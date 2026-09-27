@@ -42,4 +42,4 @@ To pause AI work press ESC.
 
 ## 📄 License
 
-This project is licensed under the **MIT License**. You are free to modify, copy, and distribute the code, but the author bears no responsibility for any consequences of its use. The full text of the license can be found in the `LICENSE` file.
+This project is licensed under the **GNUv3 License**. You are free to modify, copy, and distribute the code, but the author bears no responsibility for any consequences of its use. The full text of the license can be found in the `LICENSE` file.
