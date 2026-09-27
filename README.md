@@ -1,4 +1,4 @@
-Alpha version!
+**Alpha version!**
 
 A complex local AI system based on the Mamba SSM architecture and convolutional networks. The project is built on the C++ / CUDA / OpenMP stack and is designed for autonomous process management using real-time screen capture and system audio streams.
 
