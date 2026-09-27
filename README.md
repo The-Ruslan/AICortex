@@ -6,6 +6,8 @@ A complex local AI system based on the Mamba SSM architecture and convolutional 
 
 **PLEASE READ THIS BEFORE USING THE SOFTWARE:**
 
+This project is **an independent open-source development** and is not affiliated, associated, or in any way officially connected with any existing commercial companies or trademarks named "AICortex".
+
 This project is created solely for informational, research, and experimental purposes. The author **assumes no liability or responsibility** for how you or any third parties use this software product. 
 
 * **In-Game Use:** The author does not support, endorse, or encourage the creation of cheats, clickers, or automated systems for online games. Any use of this AI to gain an unfair advantage violates the End User License Agreements (EULA) of most developers and may lead to an account ban. You proceed entirely at your own risk.
