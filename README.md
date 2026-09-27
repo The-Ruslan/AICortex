@@ -1,4 +1,4 @@
-## ALPHA VERSION!
+## ALPHA VERSION! NEEDS TO TEST
 
 A complex local AI system based on the Mamba SSM architecture and convolutional networks. The project is built on the C++ / CUDA / OpenMP stack and is designed for autonomous process management using real-time screen capture and system audio streams.
 
@@ -31,6 +31,7 @@ The AI utilizes a hybrid approach for analysis and decision-making:
 3. **RL by user actions and user evaluations** — Reinforcement learning based on user actions and manual user feedback.
 4. **RL by user actions and critic evaluations** — Training based on human actions, but evaluated by an internal critic model.
 5. **RL by AI actions and critic evaluations** — Fully autonomous mode (the AI acts independently, and the critic evaluates the actions).
+
 Manual user feedback for AI: arrow UP is +1 score, DOWN is -1, LEFT is -0.5 and RIGHT is +0.5 score.
 To pause AI work press ESC.
 
