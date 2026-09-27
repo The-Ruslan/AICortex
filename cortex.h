@@ -424,13 +424,13 @@ private:
 				performBackwardStep(final_shame_score / meta_seq_len * score * (1.0f / shame_experiences[start_idx + meta_seq_len - 1]->past_pass_count), epoch);
 			}
 			meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardMetaOP{meta_gradient_sum.data(), meta_adapted_data.data(), meta_backup_data.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), __float2half2_rn(final_shame_score)}, stream_backward.get());
-			if ((seq_idx & 7) == 7)
+			if ((seq_idx & 3) == 3)
 			{
 				checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			}
 		}
-		const __half2 meta_lr2_inv = __float2half2_rn(-1.0f * (0.01f - 1.0f / (1.0f + std::expf(-0.001f * (epoch - 20000))) * (0.01f - 0.003f)));
+		const __half2 meta_lr2_inv = __float2half2_rn(-1.0f * (0.01f - 1.0f / (1.0f + std::expf(-0.001f * (epoch - 2000))) * (0.01f - 0.003f)));
 		meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardScaleOP{meta_adapted_data.data(), meta_gradient_sum.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), __float2half2_rn(1.0f / num_sequences), meta_lr2_inv}, stream_backward.get());
 	}
 	void performBackwardStandard(float score, int epoch)
@@ -455,7 +455,7 @@ private:
 				shame_exp->shame_score = fminimum;
 			}
 			performBackwardStep(final_shame_score / meta_seq_len * score * (1.0f / shame_experiences[start_idx + meta_seq_len - 1]->past_pass_count), epoch);
-			if ((seq_idx & 7) == 7)
+			if ((seq_idx & 3) == 3)
 			{
 				checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
