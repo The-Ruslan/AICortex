@@ -39,7 +39,3 @@ To pause AI work press ESC.
 
 * **OS:** Windows 10 / 11 (64-bit)
 * **GPU:** NVIDIA Graphics Card with sm75+ architecture (Compute Capability 7.5+).
-
-## 📄 License
-
-This project is licensed under the **GNUv3 License**. You are free to modify, copy, and distribute the code, but the author bears no responsibility for any consequences of its use. The full text of the license can be found in the `LICENSE` file.
