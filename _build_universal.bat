@@ -211,7 +211,7 @@ cl.exe *.obj ^
 	User32.lib Gdi32.lib Ole32.lib OleAut32.lib windowsapp.lib d3d11.lib
 if %ERRORLEVEL% NEQ 0 goto error
 
-del *.obj >nul 2>nul
+del *.obj *.exp *.lib >nul 2>nul
 
 echo [INFO] Searching and copying LLVM OpenMP DLL (!OMP_DLL_NAME!)...
 set "DLL_FOUND=0"

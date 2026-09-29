@@ -155,7 +155,7 @@ __device__ __forceinline__ float tensor_cores_m16n8k32(const uint32_t* __restric
 	const float s_w1 = dequantize_scale(weight_scales[(weight_outc_0 + 1) * groups_per_in]);
 	return (lane_id & 1) == 0 ? static_cast<float>(d_frag.x) * s_in * s_w0 : static_cast<float>(d_frag.y) * s_in * s_w1;
 }
-__device__ __forceinline__ float tensor_cores_m16n8k32_smem(const uint32_t* __restrict__ smem_input, const int8_t*  __restrict__ input_scale, const uint32_t* __restrict__ weights, const int8_t*  __restrict__ weight_scales, int MidC, int outc_blk_start, int lane_id)
+__device__ __forceinline__ float tensor_cores_m16n8k32_smem(const uint32_t* __restrict__ smem_input, const int8_t& input_scale, const uint32_t* __restrict__ weights, const int8_t*  __restrict__ weight_scales, int MidC, int outc_blk_start, int lane_id)
 {
 	int4 c_frag = make_int4(0, 0, 0, 0), d_frag = make_int4(0, 0, 0, 0);
 	const int weight_outc_0 = outc_blk_start + ((lane_id & 3) << 1), groups_per_mid = MidC >> 5;
@@ -173,7 +173,7 @@ __device__ __forceinline__ float tensor_cores_m16n8k32_smem(const uint32_t* __re
 		d_frag.x = accumulated_outc_0;
 		c_frag = d_frag;
 	}
-	const float s_in = dequantize_scale(*input_scale);
+	const float s_in = dequantize_scale(input_scale);
 	const float s_w0 = dequantize_scale(weight_scales[weight_outc_0 * groups_per_mid]);
 	const float s_w1 = dequantize_scale(weight_scales[(weight_outc_0 + 1) * groups_per_mid]);
 	return (lane_id & 1) == 0 ? static_cast<float>(d_frag.x) * s_in * s_w0 : static_cast<float>(d_frag.y) * s_in * s_w1;
@@ -389,7 +389,7 @@ __global__ void convFusedPointwiseFwdKernel(const uint32_t* __restrict__ input, 
 	if (outc_2 < OutC)
 	{
 		#if __CUDA_ARCH__ >= 800
-		acc2 = tensor_cores_m16n8k32_smem(smem_middle, &s_mid_scale, weights2, weight_scales2, MidC, (outc_2 >> 3) << 3, lane_id);
+		acc2 = tensor_cores_m16n8k32_smem(smem_middle, s_mid_scale, weights2, weight_scales2, MidC, (outc_2 >> 3) << 3, lane_id);
 		#else
 		const int groups_per_in2 = MidC >> 5;
 		const int outc_groups2 = outc_2 * groups_per_in2;
