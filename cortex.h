@@ -278,7 +278,7 @@ private:
 		mamba->backward(grad_output, exp.visaud_fwd, exp.visaud_fwd_scales, grad_input);
 		for (int i = blocks.size() - 1; i > -1; i--) blocks[i]->backward(grad_input, blocks_data.data() + i * (blocks_data.size() / blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / blocks.size()), exp.stochasticDepth[i]);
 		grad_output.fill(0, grad_output.size(), h_zero(), stream_backward.get());
-		LAUNCH_KERNEL(mseGradOutputKernel<>, (probs_fwd.size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward.get(), output_predictor.data(), output_fwd.data(), grad_output.data(), output_fwd.size() / probs_fwd.size(), probs_fwd.size(), score);
+		LAUNCH_KERNEL(huberGradOutputKernel<>, (probs_fwd.size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward.get(), output_predictor.data(), output_fwd.data(), grad_output.data(), output_fwd.size() / probs_fwd.size(), probs_fwd.size(), score, hall_of_shame->getHuberDelta());
 		predictor->backward(grad_output, exp.visaud_fwd, exp.visaud_fwd_scales, grad_input);
 		checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 	}

@@ -1236,47 +1236,72 @@ __global__ void setActionsKernel(const __half* __restrict__ arr64, action_type* 
 	if (idx < actionCount && (idx & 31) == 0) atomicOr(reinterpret_cast<unsigned long long*>(&actions[idx >> 6]), static_cast<unsigned long long>(warp_mask) << (idx & 32));
 }
 template <int dummy = 0>
-__global__ void __launch_bounds__(gpu_block_threads, 4) mseKernel(const __half* __restrict__ pred, const __half* __restrict__ real, float* __restrict__ out_loss, int num_elements)
+__global__ void __launch_bounds__(gpu_block_threads, 4) huberKernel(const __half* __restrict__ pred, const __half* __restrict__ real, float* __restrict__ out_loss, int num_elements, float delta)
 {
 	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	const int element_idx = idx << 3;
-	float local_mse = 0.0f;
+	float h[8] = {0.0f};
 	if (element_idx + 7 < num_elements)
 	{
-		const uint4* __restrict__ pred_v4 = reinterpret_cast<const uint4*>(pred);
-		const uint4* __restrict__ real_v4 = reinterpret_cast<const uint4*>(real);
-		const auto& p_h2 = reinterpret_cast<const __half2(&)[4]>(pred_v4[idx]);
-		const auto& r_h2 = reinterpret_cast<const __half2(&)[4]>(real_v4[idx]);
+		const uint4 pred_v4 = reinterpret_cast<const uint4*>(pred)[idx];
+		const uint4 real_v4 = reinterpret_cast<const uint4*>(real)[idx];
+		const auto& p_h2 = reinterpret_cast<const __half(&)[8]>(pred_v4);
+		const auto& r_h2 = reinterpret_cast<const __half(&)[8]>(real_v4);
+		float diff[8];
+		#pragma unroll
+		for (int i = 0; i < 8; i++) diff[i] = __half2float(p_h2[i]) - __half2float(r_h2[i]);
+		#pragma unroll
+		for (int i = 0; i < 8; i++)
+		{
+			const float abs_d = fabsf(diff[i]);
+			h[i] = abs_d <= delta ? 0.5f * diff[i] * diff[i] : delta * fmaf(-0.5f, delta, abs_d);
+		}
+	}
+	else
+	{
+		#pragma unroll
+		for (int i = 0; i < 8; i++)
+		{
+			const int idx_local = i + element_idx;
+			if (idx_local < num_elements)
+			{
+				const float diff = __half2float(pred[idx_local]) - __half2float(real[idx_local]);
+				const float abs_d = fabsf(diff);
+				h[i] = abs_d <= delta ? 0.5f * diff * diff : delta * fmaf(-0.5f, delta, abs_d);
+			}
+		}
+	}
+	float thread_sum = 0.0f;
+	#pragma unroll
+	for (int i = 0; i < 4; i++) thread_sum += h[i << 1] + h[(i << 1) + 1];
+	#pragma unroll
+	for (int offset = 16; offset > 0; offset >>= 1) thread_sum += __shfl_xor_sync(0xFFFFFFFF, thread_sum, offset);
+	if ((threadIdx.x & 31) == 0) atomicAdd(out_loss, thread_sum);
+}
+template <int dummy = 0>
+__global__ void __launch_bounds__(gpu_block_threads, 4) huberGradOutputKernel(const __half* __restrict__ pred, const __half* __restrict__ real, __half* __restrict__ grad_output, int spatial_size, int channels, float score_factor, float delta)
+{
+	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= channels) return;
+	const float factor = score_factor / spatial_size; 
+	float sum[4] = {0.0f};
+	#pragma unroll 4
+	for (int s = 0; s < spatial_size; s += 4)
+	{
+		float diff[4];
 		#pragma unroll
 		for (int i = 0; i < 4; i++)
 		{
-			const __half2 diff = __hsub2(p_h2[i], r_h2[i]);
-			const __half2 sq = __hmul2(diff, diff);
-			local_mse += __half2float(sq.x) + __half2float(sq.y);
+			const int offset = (s + i) * channels + idx;
+			diff[i] = __half2float(pred[offset]) - __half2float(real[offset]);
 		}
+		#pragma unroll
+		for (int i = 0; i < 4; i++) sum[i] += fabsf(diff[i]) <= delta ? diff[i] : copysignf(delta, diff[i]);
 	}
-	else for (int i = element_idx; i < num_elements; i++)
-	{
-		const float diff = __half2float(pred[i]) - __half2float(real[i]);
-		local_mse = fmaf(diff, diff, local_mse);
-	}
+	float thread_sum = 0.0f;
 	#pragma unroll
-	for (int offset = 16; offset > 0; offset >>= 1) local_mse += __shfl_xor_sync(0xFFFFFFFF, local_mse, offset);
-	if ((threadIdx.x & 31) == 0) atomicAdd(out_loss, local_mse);
-}
-template <int dummy = 0>
-__global__ void __launch_bounds__(gpu_block_threads, 4) mseGradOutputKernel(const __half* __restrict__ pred, const __half* __restrict__ real, __half* __restrict__ grad_output, int spatial_size, int channels, float score_factor)
-{
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= channels) return;
-    const float factor = 2.0f * score_factor / spatial_size;
-    float thread_sum = 0.0f;
-    for (int s = 0; s < spatial_size; ++s)
-    {
-        const int offset = s * channels + idx;
-        thread_sum += (__half2float(pred[offset]) - __half2float(real[offset]));
-    }
-    if (thread_sum != 0.0f) atomicAddHalfFloat(&grad_output[idx], thread_sum * factor);
+	for (int i = 0; i < 2; i++) thread_sum += sum[i << 1] + sum[(i << 1) + 1];
+	if (thread_sum != 0.0f) atomicAddHalfFloat(&grad_output[idx], thread_sum * factor);
 }
 __host__ __device__ __forceinline__ constexpr int constexpr_clz(unsigned int x)
 {

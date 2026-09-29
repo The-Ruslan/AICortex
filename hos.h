@@ -19,7 +19,7 @@ private:
 	std::vector<S_Experience> entries, history_buffer;
 	universal_vector<float> loss;
 	size_t min_group_start = 0, history_index = 0;
-	float avg_ent = 1.0f, avg_mse = 0.01f, avg_shame_rolling = 1.0f;
+	float avg_ent = 1.0f, avg_huber = 0.01f, avg_shame_rolling = 1.0f;
 	static constexpr float momentum = 0.99f;
 	bool history_ready = false;
 	float get_group_total_shame(size_t start_idx)
@@ -29,13 +29,14 @@ private:
 		return total;
 	}
 public:
-    HallOfShame(size_t exp_mem_size_total, size_t exp_buffer_size_active) :
+	float getHuberDelta() const { return sqrtf(avg_huber + epsilon); }
+	HallOfShame(size_t exp_mem_size_total, size_t exp_buffer_size_active) :
 		exp_buffer_size_total(exp_mem_size_total),
 		exp_main_range(exp_buffer_size_total - exp_buffer_size_active),
 		entries(exp_buffer_size_total),
 		history_buffer(meta_seq_len),
 		loss(1, MemoryType::PinnedHost) {}
-    void initData(uint8_t*& current_host_main_ptr, int blocks_data_size)
+	void initData(uint8_t*& current_host_main_ptr, int blocks_data_size)
 	{
 		for (auto& entry : entries)
 		{
@@ -58,12 +59,12 @@ public:
 	{
 		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP{}, probs_fwd.size(), stream) / probs_fwd.size();
 		loss[0] = 0.0f;
-		LAUNCH_KERNEL(mseKernel<>, (((output_predictor.size() + 7) >> 3) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream, output_predictor.data(), output_fwd.data(), loss.data(), output_predictor.size());
+		LAUNCH_KERNEL(huberKernel<>, (((output_predictor.size() + 7) >> 3) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream, output_predictor.data(), output_fwd.data(), loss.data(), output_predictor.size(), getHuberDelta());
 		checkCudaError(cudaStreamSynchronize(stream));
 		const float predict_err = *const_cast<volatile float*>(loss.data()) / output_fwd.size();
 		avg_ent = fmaf(momentum, avg_ent, (1.0f - momentum) * entropy_sum);
-		avg_mse = fmaf(momentum, avg_mse, (1.0f - momentum) * predict_err);
-		const float shame_score = entropy_sum / (avg_ent + epsilon) + predict_err / (avg_mse + epsilon);
+		avg_huber = fmaf(momentum, avg_huber, (1.0f - momentum) * predict_err);
+		const float shame_score = entropy_sum / (avg_ent + epsilon) + predict_err / (avg_huber + epsilon);
 		history_buffer[history_index](exp, stream);
 		history_buffer[history_index].shame_score = shame_score;
 	}
@@ -98,9 +99,9 @@ public:
 		}
 		min_group_start = worst_group_start;
 	}
-    void getEntries(std::vector<S_Experience*>& result)
+	void getEntries(std::vector<S_Experience*>& result)
 	{
-        result.reserve(entries.size());
+		result.reserve(entries.size());
 		std::vector<S_Experience*> preresult(meta_seq_len);
 		for (size_t i = 0; i < entries.size(); i += meta_seq_len)
 		{
@@ -117,5 +118,5 @@ public:
 			}
 			if (full_entried) for (size_t j = 0; j < meta_seq_len; j++) result.push_back(preresult[j]);
 		}
-    }
+	}
 };
