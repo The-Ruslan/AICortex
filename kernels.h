@@ -202,7 +202,7 @@ __global__ void __launch_bounds__(gpu_block_threads, 4) quantizeKernel(const __h
 	const float scale = abs_max < epsilon ? 1.0f : abs_max;
 	scales[idx] = quantize_scale(scale);
 	const float inv_scale = quant_int4_max * __frcp_rn(scale);
-	uint4 out_packed = {0, 0, 0, 0};
+	uint4 out_packed = {};
 	auto& out_packed_ptr = reinterpret_cast<uint32_t(&)[4]>(out_packed);
 	const uint32_t thread_seed = generateUniqueSeed(idx);
 	#pragma unroll
@@ -707,7 +707,7 @@ __global__ void convDepthwiseFwdKernel(const uint32_t* __restrict__ input, const
 		const int cur_w = w_in_start + p_idx % kernel_size;
 		if (cur_h >= 0 && cur_h < Dimension_in && cur_w >= 0 && cur_w < Dimension_in) smem_in[i] = load_u32(input, cur_h * Dimension_in + cur_w, u32_stride_in, (group_idx << 2) + (i & 3));
 	}
-	float acc = __half2float(biases[outc]), acc_arr[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	float acc = __half2float(biases[outc]), acc_arr[4] = {};
 	const int u32_off = lane_id >> 3, shift = lane_id & 7;
 	int k = 0;
 	__syncwarp();
@@ -1064,7 +1064,7 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 			if (oc < block_oc_end)
 			{
 				const int w_base = off_W_out + oc * mamba_d_inner;
-				float local_s_arr[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+				float local_s_arr[4] = {};
 				uint32_t w_raw[4];
 				int8_t ws_raw[4];
 				for (int ic = lane_id; ic < mamba_d_inner; ic += 128)
@@ -1240,7 +1240,7 @@ __global__ void __launch_bounds__(gpu_block_threads, 4) huberKernel(const __half
 {
 	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	const int element_idx = idx << 3;
-	float h[8] = {0.0f};
+	float h[8] = {};
 	if (element_idx + 7 < num_elements)
 	{
 		const uint4 pred_v4 = reinterpret_cast<const uint4*>(pred)[idx];
@@ -1284,7 +1284,7 @@ __global__ void __launch_bounds__(gpu_block_threads, 4) huberGradOutputKernel(co
 	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= channels) return;
 	const float factor = score_factor / spatial_size; 
-	float sum[4] = {0.0f};
+	float sum[4] = {};
 	#pragma unroll 4
 	for (int s = 0; s < spatial_size; s += 4)
 	{
