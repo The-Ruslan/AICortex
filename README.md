@@ -24,7 +24,7 @@ This project is created solely for informational, research, and experimental pur
 The AI utilizes a hybrid approach for analysis and decision-making:
 - Convolutional and residual layers for initial feature processing.
 - Efficient sequence and temporal context processing via State Space Model (SSM).
-- Actor-Critic and Mamba-predictor for implementing Reinforcement Learning and World Model algorithms.
+- Actor-Critic for implementing Reinforcement Learning and prediction algorithms.
 
 ## 🚀 Operating Modes
 
