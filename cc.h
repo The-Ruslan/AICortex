@@ -15,9 +15,10 @@ private:
 	int counter = 0, meta_strike_counter = 0;
 public:
 	ConvergenceController() {}
-	E_BackwardStrategy updateAndGetStrategy(const universal_vector<__half>& input, cudaStream_t stream, bool is_meta_step)
+	template <typename T = __half>
+	E_BackwardStrategy updateAndGetStrategy(const universal_vector<T>& input, cudaStream_t stream, bool is_meta_step)
 	{
-		const float current_norm = sqrtf(input.transform_reduce<float>(SquareOp{}, input.size(), stream) / input.size() + epsilon);
+		const float current_norm = sqrtf(input.template transform_reduce<float>(SquareOp{}, input.size(), stream) / input.size() + epsilon);
 		if (ema_norm < 0)
 		{
 			ema_norm = current_norm;

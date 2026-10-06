@@ -97,19 +97,6 @@ __device__ __forceinline__ uint32_t bfi(uint32_t source, uint32_t insert, uint32
     asm("bfi.b32 %0, %1, %2, %3, %4;" : "=r"(result) : "r"(insert), "r"(source), "r"(pos), "r"(len));
     return result;
 }
-__device__ __forceinline__ void atomicAddHalfFloat(__half* addr, float val)
-{
-	const uintptr_t addr_val = reinterpret_cast<uintptr_t>(addr);
-	unsigned int *base_addr = reinterpret_cast<unsigned int*>(addr_val & ~3), old = *static_cast<volatile unsigned int*>(base_addr), assumed;
-	const bool is_high = (addr_val & 2) != 0;
-	const unsigned int bit_pos = is_high ? 16 : 0;
-	do
-	{
-		assumed = old;
-		old = atomicCAS(base_addr, assumed, bfi(assumed, static_cast<uint32_t>(__half_as_ushort(__float2half(__half2float(__ushort_as_half(is_high ? assumed >> 16 : assumed & 0xFFFF)) + val))), bit_pos, 16));
-	}
-	while (assumed != old);
-}
 __device__ __forceinline__ float silu_grad(float x, float dy)
 {
 	const float sig = __frcp_rn(1.0f + __expf(-x));
@@ -178,67 +165,47 @@ __device__ __forceinline__ float tensor_cores_m16n8k32_smem(const uint32_t* __re
 	const float s_w1 = dequantize_scale(weight_scales[(weight_outc_0 + 1) * groups_per_mid]);
 	return (lane_id & 1) == 0 ? static_cast<float>(d_frag.x) * s_in * s_w0 : static_cast<float>(d_frag.y) * s_in * s_w1;
 }
-template <int dummy = 0>
-__global__ void __launch_bounds__(gpu_block_threads, 4) quantizeKernel(const __half* __restrict__ input, uint32_t* __restrict__ output, int8_t* __restrict__ scales, int total_elements)
+template <typename T = __half>
+__global__ void __launch_bounds__(gpu_block_threads, 4) quantizeKernel(const T* __restrict__ input, uint32_t* __restrict__ output, int8_t* __restrict__ scales, int total_elements)
 {
 	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	const int base_idx = idx << 5;
 	if (base_idx >= total_elements) return;
-	__half2 data2[16], h2_max = h2_minimum();
+	T local_data[32];
 	const uint4* __restrict__ input_v4 = reinterpret_cast<const uint4*>(input + base_idx);
 	#pragma unroll
-	for (int i = 0; i < 4; ++i)
-	{
-		const auto& input_val_ptr = reinterpret_cast<const __half2(&)[4]>(input_v4[i]);
-		#pragma unroll
-		for (int j = 0; j < 4; ++j)
-		{
-			const int idx_local = (i << 2) + j;
-			data2[idx_local] = input_val_ptr[j];
-			h2_max = __hmax2(h2_max, __habs2(data2[idx_local]));
-		}
-	}
-	const float abs_max = __half2float(__hmax(__low2half(h2_max), __high2half(h2_max)));
+	for (int i = 0; i < (sizeof(T) << 5) / sizeof(uint4); ++i) reinterpret_cast<uint4*>(local_data)[i] = input_v4[i];
+	float abs_max = 0.0f;
+	#pragma unroll
+	for (int i = 0; i < 32; ++i) abs_max = fmaxf(abs_max, fabsf(static_cast<float>(local_data[i])));
 	const float scale = abs_max < epsilon ? 1.0f : abs_max;
 	scales[idx] = quantize_scale(scale);
 	const float inv_scale = quant_int4_max * __frcp_rn(scale);
-	uint4 out_packed = {};
-	auto& out_packed_ptr = reinterpret_cast<uint32_t(&)[4]>(out_packed);
+	uint32_t out_words[4] = {};
 	const uint32_t thread_seed = generateUniqueSeed(idx);
 	#pragma unroll
-	for (int i = 0; i < 4; ++i)
-	{
-		#pragma unroll
-		for (int j = 0; j < 4; ++j)
-		{
-			const int idx_local = (i << 2) + j;
-			const int low = quantize_scalar_to_int4_stochastic(__low2float(data2[idx_local]), inv_scale, thread_seed ^ idx_local);
-			const int high = quantize_scalar_to_int4_stochastic(__high2float(data2[idx_local]), inv_scale, thread_seed ^ idx_local ^ 16);
-			out_packed_ptr[i] |= (low << (j << 3)) | (high << ((j << 3) + 4));
-		}
-	}
-	uint4* __restrict__ output_v4 = reinterpret_cast<uint4*>(output);
-	output_v4[idx] = out_packed;
+	for (int i = 0; i < 32; ++i) out_words[i >> 3] |= (quantize_scalar_to_int4_stochastic(static_cast<float>(local_data[i]), inv_scale, thread_seed ^ i) << ((i & 7) << 2));
+	reinterpret_cast<uint4*>(output)[idx] = *reinterpret_cast<uint4*>(out_words);
 }
-template <int dummy = 0>
-__global__ void __launch_bounds__(gpu_block_threads, 4) updateParamsKernel(__half* __restrict__ data, const __half* __restrict__ grad, int size, __half grad_norm_factor, __half learning_rate, __half2 h2_penalty)
+template <typename T = __half>
+__global__ void __launch_bounds__(gpu_block_threads, 4) updateParamsKernel(T* __restrict__ data, const T* __restrict__ grad, int size, float grad_norm_factor, float learning_rate, float penalty)
 {
-	const __half2 h2_lr = __half2half2(__hneg(learning_rate));
-	const __half2 c_grad = __hmul2(h2_lr, __half2half2(grad_norm_factor));
-	const __half2 c_data = __hfma2(h2_lr, h2_penalty, h2_one());
+	constexpr int elements_per_uint4 = sizeof(uint4) / sizeof(T);
+	const float c_grad = -learning_rate * grad_norm_factor;
+	const float c_data = fmaf(-learning_rate, penalty, 1.0f);
 	const uint4* __restrict__ grad_v4 = reinterpret_cast<const uint4*>(grad);
 	uint4* __restrict__ data_v4 = reinterpret_cast<uint4*>(data);
-	const int size_v4 = size >> 3;
+	const int size_v4 = size / elements_per_uint4;
 	const int stride = blockDim.x * gridDim.x;
 	#pragma unroll 4
 	for (int v_idx = blockIdx.x * blockDim.x + threadIdx.x; v_idx < size_v4; v_idx += stride)
 	{
-		uint4 local_d = data_v4[v_idx];
-		auto& local_d_ptr = reinterpret_cast<__half2(&)[4]>(local_d);
-		const auto& local_g_ptr = reinterpret_cast<const __half2(&)[4]>(grad_v4[v_idx]);
+		T local_d[elements_per_uint4], local_g[elements_per_uint4];
+		*reinterpret_cast<uint4*>(local_d) = data_v4[v_idx];
+		*reinterpret_cast<uint4*>(local_g) = grad_v4[v_idx];
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) local_d_ptr[i] = __hfma2(local_g_ptr[i], c_grad, __hmul2(local_d_ptr[i], c_data));
-		data_v4[v_idx] = local_d;
+		for (int i = 0; i < elements_per_uint4; ++i) local_d[i] = static_cast<T>(fmaf(static_cast<float>(local_g[i]), c_grad, static_cast<float>(local_d[i]) * c_data));
+		data_v4[v_idx] = *reinterpret_cast<uint4*>(local_d);
 	}
 }
 template <int channels_per_block = gpu_block_threads>
@@ -447,8 +414,8 @@ __global__ void convFusedPointwiseFwdKernel(const uint32_t* __restrict__ input, 
 	if ((lane_id & 7) == 0 && outc_2 < OutC) output[spatial_idx_out * (OutC >> 3) + (outc_2 >> 3)] = val2;
 	if (lane_id == 0 && outc_2 < OutC) output_scales[spatial_idx_out * (OutC >> 5) + (outc_2 >> 5)] = quantize_scale(out_scale2);
 }
-template <int channels_per_block = gpu_block_threads>
-__global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const __half* __restrict__ grad_output, const __half* __restrict__ master_weights, __half* __restrict__ grad_input, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
+template <typename T = __half, int channels_per_block = gpu_block_threads>
+__global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const T* __restrict__ grad_output, const T* __restrict__ master_weights, T* __restrict__ grad_input, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
 {
 	const int spatial_idx_out = blockIdx.z * gridDim.y + blockIdx.y;
 	const int log2_dim_out = __ffs(Dimension_out) - 1;
@@ -462,8 +429,7 @@ __global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ inp
 	const uint4* __restrict__ input_v4_base = reinterpret_cast<const uint4*>(input + spatial_idx_in * u32_stride_in);
 	float fwd_acc = 0.0f;
 	uint32_t dot_shared[4];
-	uint4 next_w = w_v4[0];
-	uint4 next_in_v4 = lane_id == 0 ? input_v4_base[0] : make_uint4(0, 0, 0, 0);
+	uint4 next_w = w_v4[0], next_in_v4 = lane_id == 0 ? input_v4_base[0] : make_uint4(0, 0, 0, 0);
 	int8_t next_in_scale = input_scales[spatial_groups];
 	int8_t next_w_scale = weight_scales[outc_groups];
 	#pragma unroll 2
@@ -507,7 +473,7 @@ __global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ inp
 	}
 	__syncthreads();
 	const float inv_rms = __frsqrt_rn((smem_block_total / channels_per_block) + epsilon);
-	smem_dy_normed[threadIdx.x] = silu_grad(fwd_acc * inv_rms, __half2float(grad_output[spatial_idx_out * OutC + outc])) * inv_rms;
+	smem_dy_normed[threadIdx.x] = silu_grad(fwd_acc * inv_rms, static_cast<float>(grad_output[spatial_idx_out * OutC + outc])) * inv_rms;
 	__syncthreads();
 	for (int inc_base = 0; inc_base < InC; inc_base += channels_per_block)
 	{
@@ -516,13 +482,13 @@ __global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ inp
 		{
 			float acc_input = 0.0f;
 			#pragma unroll 8
-			for (int i = 0; i < channels_per_block; ++i) acc_input = fmaf(smem_dy_normed[i], __half2float(master_weights[blockIdx.x * channels_per_block + i * InC + curr_inc]), acc_input);
-			atomicAddHalfFloat(&grad_input[(((spatial_idx_out >> log2_dim_out) * stride << (__ffs(Dimension_in) - 1)) + (spatial_idx_out & (Dimension_out - 1)) * stride) * InC + curr_inc], acc_input);
+			for (int i = 0; i < channels_per_block; ++i) acc_input = fmaf(smem_dy_normed[i], static_cast<float>(master_weights[blockIdx.x * channels_per_block + i * InC + curr_inc]), acc_input);
+            atomicAdd(&grad_input[(((spatial_idx_out >> log2_dim_out) * stride << (__ffs(Dimension_in) - 1)) + (spatial_idx_out & (Dimension_out - 1)) * stride) * InC + curr_inc], static_cast<T>(acc_input));
 		}
 	}
 }
-template <int block_size = 32, int channels_per_block = gpu_block_threads>
-__global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const __half* __restrict__ grad_output, __half* __restrict__ grad_weights, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
+template <typename T = __half, int block_size = 32, int channels_per_block = gpu_block_threads>
+__global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const T* __restrict__ grad_output, T* __restrict__ grad_weights, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
 {
 	const int outc = blockIdx.x * block_size + threadIdx.x;
 	const int inc_load = blockIdx.y * block_size + threadIdx.x;
@@ -530,16 +496,15 @@ __global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 	const int groups_per_in = InC >> 5, u32_stride_in = InC >> 3;
 	const int log2_dim_out = __ffs(Dimension_out) - 1, mask_dim_out = Dimension_out - 1;
 	const int NHW_out = Dimension_out * Dimension_out, outc_groups = outc * groups_per_in;
-	const int shift = inc_load & 7;
 	constexpr int warps_per_gn_group = channels_per_block / block_size, gn_groups_per_block = block_size * block_size / channels_per_block;
 	__shared__ float smem_in[block_size][block_size + 1], smem_gn_warps[block_size], smem_gn_groups[gn_groups_per_block > 0 ? gn_groups_per_block : 1];
-	__shared__ __half smem_grad_out[block_size][block_size + 1];
+	__shared__ T smem_grad_out[block_size][block_size + 1];
 	float sum = 0.0f;
 	for (int p_base = 0; p_base < NHW_out; p_base += block_size)
 	{
 		const int p_in = p_base + threadIdx.y;
 		const int spatial_idx_in = (p_in >> log2_dim_out) * stride * Dimension_in + (p_in & mask_dim_out) * stride;
-		smem_in[threadIdx.y][threadIdx.x] = dequantize_scalar(load_u32(input, spatial_idx_in, u32_stride_in, inc_load >> 3), shift, input_scales[spatial_idx_in * groups_per_in + (inc_load >> 5)]);
+		smem_in[threadIdx.y][threadIdx.x] = dequantize_scalar(load_u32(input, spatial_idx_in, u32_stride_in, inc_load >> 3), inc_load & 7, input_scales[spatial_idx_in * groups_per_in + (inc_load >> 5)]);
 		const int p_grad = p_base + threadIdx.y;
 		const int spatial_idx_in_fwd = (p_grad >> log2_dim_out) * stride * Dimension_in + (p_grad & mask_dim_out) * stride;
 		const int spatial_groups_fwd = spatial_idx_in_fwd * groups_per_in;
@@ -590,8 +555,8 @@ __global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 		}
 		__syncthreads();
 		const float inv_rms = __frsqrt_rn((smem_gn_groups[threadIdx.y / warps_per_gn_group] / channels_per_block) + epsilon);
-		smem_grad_out[threadIdx.y][threadIdx.x] = __float2half(silu_grad(fwd_acc * inv_rms, __half2float(grad_output[p_grad * OutC + outc])) * inv_rms);
-		__half go[4];
+		smem_grad_out[threadIdx.y][threadIdx.x] = static_cast<T>(silu_grad(fwd_acc * inv_rms, static_cast<float>(grad_output[p_grad * OutC + outc])) * inv_rms);
+		T go[4];
 		float gi[4];
 		__syncthreads();
 		#pragma unroll
@@ -602,14 +567,14 @@ __global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 			#pragma unroll
 			for (int i = 0; i < 4; i++) go[i] = smem_grad_out[k + i][threadIdx.x];
 			#pragma unroll
-			for (int i = 0; i < 4; i++) sum = fmaf(gi[i], __half2float(go[i]), sum);
+			for (int i = 0; i < 4; i++) sum = fmaf(gi[i], static_cast<float>(go[i]), sum);
 		}
 		__syncthreads();
 	}
-	grad_weights[outc * InC + blockIdx.y * block_size + threadIdx.y] = __float2half(sum);
+	grad_weights[outc * InC + blockIdx.y * block_size + threadIdx.y] = static_cast<T>(sum);
 }
-template <int channels_per_block = gpu_block_threads>
-__global__ void convPointwiseBwdGradBiasKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const __half* __restrict__ grad_output, __half* __restrict__ grad_biases, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
+template <typename T = __half, int channels_per_block = gpu_block_threads>
+__global__ void convPointwiseBwdGradBiasKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const T* __restrict__ grad_output, __half* __restrict__ grad_biases, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
 {
 	const int lane_id = threadIdx.x & 31;
 	const int outc = blockIdx.x * channels_per_block + threadIdx.x;
@@ -673,7 +638,7 @@ __global__ void convPointwiseBwdGradBiasKernel(const uint32_t* __restrict__ inpu
 		}
 		__syncthreads();
 		const float inv_rms = __frsqrt_rn((smem_block_total / channels_per_block) + epsilon);
-		bias_grad_accumulator = fmaf(silu_grad(fwd_acc * inv_rms, __half2float(grad_output[p * OutC + outc])), inv_rms, bias_grad_accumulator);
+		bias_grad_accumulator = fmaf(silu_grad(fwd_acc * inv_rms, static_cast<float>(grad_output[p * OutC + outc])), inv_rms, bias_grad_accumulator);
 	}
 	grad_biases[outc] = __float2half(bias_grad_accumulator);
 }
@@ -745,8 +710,8 @@ __global__ void convDepthwiseFwdKernel(const uint32_t* __restrict__ input, const
 	if ((lane_id & 7) == 0) output[spatial_idx_out * u32_stride_in + (group_idx << 2) + (lane_id >> 3)] = val;
 	if (lane_id == 0) output_scales[spatial_idx_out * groups_per_in + group_idx] = quantize_scale(out_scale);
 }
-template <int kernel_size = 7>
-__global__ void convDepthwiseBwdGradInputKernel(const __half* __restrict__ grad_output, const __half* __restrict__ master_weights, __half* __restrict__ grad_input, int InC, int Dimension_in, int Dimension_out, int stride)
+template <typename T = __half, int kernel_size = 7>
+__global__ void convDepthwiseBwdGradInputKernel(const T* __restrict__ grad_output, const T* __restrict__ master_weights, T* __restrict__ grad_input, int InC, int Dimension_in, int Dimension_out, int stride)
 {
 	const int spatial_idx_in = blockIdx.z * gridDim.y + blockIdx.y;
 	const int lane_id = threadIdx.x & 31;
@@ -759,37 +724,36 @@ __global__ void convDepthwiseBwdGradInputKernel(const __half* __restrict__ grad_
 	constexpr int padding = kernel_size >> 1, k_sq = kernel_size * kernel_size;
 	float acc = 0.0f;
 	int next_h_out_t = h_in / kernel_size + padding, next_w_out_t = w_in % kernel_size + padding;
-	__half next_go = h_zero(), next_mw = master_weights[inc];
+	float next_go = 0.0f, next_mw = static_cast<float>(master_weights[inc]);
 	if (next_h_out_t % stride == 0 && next_w_out_t % stride == 0)
 	{
 		const int ho = next_h_out_t / stride;
 		const int wo = next_w_out_t / stride;
-		if (ho >= 0 && ho < Dimension_out && wo >= 0 && wo < Dimension_out) next_go = grad_output[(ho * Dimension_out + wo) * InC + inc];
+		if (ho >= 0 && ho < Dimension_out && wo >= 0 && wo < Dimension_out) next_go = static_cast<float>(grad_output[(ho * Dimension_out + wo) * InC + inc]);
 	}
 	#pragma unroll 4
 	for (int k = 0; k < k_sq; ++k)
 	{
-		const __half curr_go = next_go, curr_mw = next_mw;
+		const float curr_go = next_go, curr_mw = next_mw;
 		if (k + 1 < k_sq)
 		{
 			next_h_out_t = h_in - (k + 1) / kernel_size + padding;
 			next_w_out_t = w_in - (k + 1) % kernel_size + padding;
-			next_mw = master_weights[(k + 1) * InC + inc];
-			next_go = h_zero();
+			next_mw = static_cast<float>(master_weights[(k + 1) * InC + inc]);
+			next_go = 0.0f;
 			if (next_h_out_t % stride == 0 && next_w_out_t % stride == 0)
 			{
 				const int ho = next_h_out_t / stride;
 				const int wo = next_w_out_t / stride;
-				if (ho >= 0 && ho < Dimension_out && wo >= 0 && wo < Dimension_out) next_go = grad_output[(ho * Dimension_out + wo) * InC + inc];
+				if (ho >= 0 && ho < Dimension_out && wo >= 0 && wo < Dimension_out) next_go = static_cast<float>(grad_output[(ho * Dimension_out + wo) * InC + inc]);
 			}
 		}
-		acc = fmaf(__half2float(curr_go), __half2float(curr_mw), acc);
+		acc = fmaf(curr_go, curr_mw, acc);
 	}
-	const float neighbor_acc = __shfl_xor_sync(0xFFFFFFFF, acc, 1);
-	if ((lane_id & 1) == 0) *reinterpret_cast<__half2*>(grad_input + spatial_idx_in * InC + inc) = __floats2half2_rn(acc, neighbor_acc);
+	grad_input[spatial_idx_in * InC + inc] = static_cast<T>(acc);
 }
-template <int kernel_size = 7, int threads_per_block = gpu_block_threads, int chunk_size = 8>
-__global__ void convDepthwiseBwdGradWeightKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const __half* __restrict__ grad_output, __half* __restrict__ grad_weights, int InC, int Dimension_in, int Dimension_out, int stride)
+template <typename T = __half, int kernel_size = 7, int threads_per_block = gpu_block_threads, int chunk_size = 8>
+__global__ void convDepthwiseBwdGradWeightKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const T* __restrict__ grad_output, T* __restrict__ grad_weights, int InC, int Dimension_in, int Dimension_out, int stride)
 {
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
@@ -814,7 +778,7 @@ __global__ void convDepthwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 		for (int c = 0; c < chunk_size; ++c) smem_acc[threadIdx.x][c] = 0.0f;
 		for (int p = 0; p < Dimension_out * Dimension_out; ++p)
 		{
-			const float go = __half2float(grad_output[p * InC + inc]);
+			const float go = static_cast<float>(grad_output[p * InC + inc]);
 			const int h_in_base = (p >> log2_dim_out) * stride - padding;
 			const int w_in_base = (p & mask_dim_out) * stride - padding;
 			#pragma unroll 2
@@ -847,32 +811,32 @@ __global__ void convDepthwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 		for (int c = 0; c < chunk_size; ++c)
 		{
 			const int k = chunk_start + c;
-			if (k < k_sq) grad_weights[k * InC + inc] = __float2half(smem_acc[threadIdx.x][c]);
+			if (k < k_sq) grad_weights[k * InC + inc] = static_cast<T>(smem_acc[threadIdx.x][c]);
 		}
 	}
 }
-template <int dummy = 0>
-__global__ void convDepthwiseBwdGradBiasKernel(const __half* __restrict__ grad_output, __half* __restrict__ grad_biases, int InC, int NHW)
+template <typename T = __half>
+__global__ void convDepthwiseBwdGradBiasKernel(const T* __restrict__ grad_output, __half* __restrict__ grad_biases, int InC, int NHW)
 {
 	const int lane_id = threadIdx.x & 31;
 	const int group_idx = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
 	const int outc = (group_idx << 5) + lane_id;
-	float sum_arr[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	__half next_go[4];
+	float sum_arr[4] = {};
+	float next_go[4];
 	#pragma unroll
-	for (int i = 0; i < 4; ++i) next_go[i] = i < NHW ? grad_output[i * InC + outc] : h_zero();
+	for (int i = 0; i < 4; ++i) next_go[i] = i < NHW ? static_cast<float>(grad_output[i * InC + outc]) : 0.0f;
 	for (int p = 0; p < NHW; p += 4)
 	{
-		__half curr_go[4];
+		float curr_go[4];
 		#pragma unroll
 		for (int i = 0; i < 4; ++i) curr_go[i] = next_go[i];
 		if (p + 4 < NHW)
 		{
 			#pragma unroll
-			for (int i = 0; i < 4; ++i) next_go[i] = p + 4 + i < NHW ? grad_output[(p + 4 + i) * InC + outc] : h_zero();
+			for (int i = 0; i < 4; ++i) next_go[i] = p + 4 + i < NHW ? static_cast<float>(grad_output[(p + 4 + i) * InC + outc]) : 0.0f;
 		}
 		#pragma unroll
-		for (int i = 0; i < 4; i++) sum_arr[i] += __half2float(curr_go[i]);
+		for (int i = 0; i < 4; i++) sum_arr[i] += curr_go[i];
 	}
 	const float sum = sum_arr[0] + sum_arr[1] + sum_arr[2] + sum_arr[3];
 	const float neighbor_sum = __shfl_xor_sync(0xFFFFFFFF, sum, 1);
@@ -946,22 +910,23 @@ __global__ void __launch_bounds__(threads_per_block, 4) residualAddFwdKernel(con
 	}
 	for (int g_idx = threadIdx.x; g_idx < num_groups; g_idx += threads_per_block) output_scales[s_idx * num_groups + g_idx] = quantize_scale(out_scale);
 }
-template <int threads_per_block = gpu_block_threads>
-__global__ void __launch_bounds__(threads_per_block, 4) residualAddBwdKernel(const __half* __restrict__ grad_next, __half* __restrict__ grad_res, int channels, int dimension, float survival_prob_inv)
+template <typename T = __half, int threads_per_block = gpu_block_threads>
+__global__ void __launch_bounds__(threads_per_block, 4) residualAddBwdKernel(const T* __restrict__ grad_next, T* __restrict__ grad_res, int channels, int dimension, float survival_prob_inv)
 {
-	const int num_v4 = channels >> 3;
-	const __half2 h2_combined_weight = __float2half2_rn(survival_prob_inv * f_residual);
+	constexpr int elements_per_uint4 = sizeof(uint4) / sizeof(T);
+	const float combined_weight = survival_prob_inv * f_residual;
 	const int offset = (blockIdx.y * dimension + blockIdx.x) * channels;
 	const uint4* __restrict__ gn_ptr_v4 = reinterpret_cast<const uint4*>(grad_next + offset);
 	uint4* __restrict__ gr_ptr_v4 = reinterpret_cast<uint4*>(grad_res + offset);
-	for (int v_idx = threadIdx.x; v_idx < num_v4; v_idx += threads_per_block)
+	const int size_v4 = channels / elements_per_uint4;
+	#pragma unroll 2
+	for (int v_idx = threadIdx.x; v_idx < size_v4; v_idx += threads_per_block)
 	{
-		const auto& chunk_ptr = reinterpret_cast<const __half2(&)[4]>(gn_ptr_v4[v_idx]);
-		uint4 h2_res;
-		auto& h2_res_ptr = reinterpret_cast<__half2(&)[4]>(h2_res);
+		T local_gn[elements_per_uint4], local_gr[elements_per_uint4];
+		*reinterpret_cast<uint4*>(local_gn) = gn_ptr_v4[v_idx];
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) h2_res_ptr[i] = __hmul2(chunk_ptr[i], h2_combined_weight);
-		gr_ptr_v4[v_idx] = h2_res;
+		for (int i = 0; i < elements_per_uint4; ++i) local_gr[i] = static_cast<T>(static_cast<float>(local_gn[i]) * combined_weight);
+		gr_ptr_v4[v_idx] = *reinterpret_cast<uint4*>(local_gr);
 	}
 }
 template <int threads_per_block = gpu_block_threads>
@@ -1109,8 +1074,8 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 		trace_Delta[idx] = trDelta[i];
 	}
 }
-template <int threads_per_block = gpu_block_threads>
-__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const __half* __restrict__ grad_output, const __half* __restrict__ output, const float* __restrict__ trace_A_re, const float* __restrict__ trace_A_im, const float* __restrict__ trace_B, const float* __restrict__ trace_Delta, const __half* __restrict__ master_weights, __half* __restrict__ grad_weights, __half* __restrict__ grad_biases, __half* __restrict__ grad_input, const int32_t* __restrict__ hilbert_lut, int spatial_dimension, int OutC)
+template <typename T = __half, typename U = __half, int threads_per_block = gpu_block_threads>
+__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const U* __restrict__ grad_output, const __half* __restrict__ output, const float* __restrict__ trace_A_re, const float* __restrict__ trace_A_im, const float* __restrict__ trace_B, const float* __restrict__ trace_Delta, const T* __restrict__ master_weights, T* __restrict__ grad_weights, __half* __restrict__ grad_biases, T* __restrict__ grad_input, const int32_t* __restrict__ hilbert_lut, int spatial_dimension, int OutC)
 {
 	constexpr int off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
 				  off_W_C_im = off_W_C_re + mamba_d_inner * mamba_d_state,
@@ -1135,16 +1100,16 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 		dAim_acc[i] = 0.0f;
 		dBre_acc[i] = 0.0f;
 	}
-	const float D_skip = __half2float(master_weights[off_D + ch_idx]), W_delta = __half2float(master_weights[ch_idx]);
+	const float D_skip = static_cast<float>(master_weights[off_D + ch_idx]), W_delta = static_cast<float>(master_weights[ch_idx]);
 	for (int t = 0; t < spatial_dimension; ++t)
 	{
 		float grad_y_ssm = 0.0f;
 		for (int oc = 0; oc < OutC; ++oc)
 		{
 			const float o = __half2float(output[t * OutC + oc]);
-			const float g_act = __half2float(grad_output[t * OutC + oc]) * o * (1.0f - o);
-			grad_y_ssm = fmaf(g_act, __half2float(master_weights[off_W_out + oc * mamba_d_inner + ch_idx]), grad_y_ssm);
-			if (blockIdx.y == 0 && threadIdx.x == 0 && t == 0) atomicAddHalfFloat(&grad_biases[oc], g_act);
+			const float g_act = static_cast<float>(grad_output[t * OutC + oc]) * o * (1.0f - o);
+			grad_y_ssm = fmaf(g_act, static_cast<float>(master_weights[off_W_out + oc * mamba_d_inner + ch_idx]), grad_y_ssm);
+			if (blockIdx.y == 0 && threadIdx.x == 0 && t == 0) atomicAdd(&grad_biases[oc], __float2half(g_act));
 		}
 		const int base_tr = ch_idx * mamba_d_state;
 		#pragma unroll
@@ -1160,18 +1125,18 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 		const float x_t = dequantize_scalar(load_u32(input, h_idx_t, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[h_idx_t * groups_per_in + (in_ch_idx >> 5)]);
 		dW_delta_acc = fmaf(grad_y_ssm, current_trace_delta, dW_delta_acc);
 		dD_acc = fmaf(grad_y_ssm, x_t, dD_acc);
-		atomicAddHalfFloat(grad_input + h_idx_t * final_channels + (ch_idx & (final_channels - 1)), fmaf(grad_y_ssm * current_trace_delta * __frcp_rn(1.0f + __expf(-x_t * W_delta)), W_delta, grad_y_ssm * D_skip));
+		atomicAdd(grad_input + h_idx_t * final_channels + (ch_idx & (final_channels - 1)), static_cast<T>(fmaf(grad_y_ssm * current_trace_delta * __frcp_rn(1.0f + __expf(-x_t * W_delta)), W_delta, grad_y_ssm * D_skip)));
     }
-	atomicAddHalfFloat(&grad_weights[ch_idx], dW_delta_acc);
-	atomicAddHalfFloat(&grad_weights[off_D + ch_idx], dD_acc);
+	atomicAdd(&grad_weights[ch_idx], static_cast<T>(dW_delta_acc));
+	atomicAdd(&grad_weights[off_D + ch_idx], static_cast<T>(dD_acc));
 	const int base_row_offset = ch_idx * mamba_d_state;
 	#pragma unroll
 	for (int i = 0; i < mamba_cols; ++i)
 	{
 		const int w_idx = base_row_offset + lane_id + (i << 5);
-		atomicAddHalfFloat(&grad_weights[off_A_re + w_idx], dAre_acc[i]);
-		atomicAddHalfFloat(&grad_weights[off_A_im + w_idx], dAim_acc[i]);
-		atomicAddHalfFloat(&grad_weights[mamba_d_inner + block_ch_idx / mamba_mimo_group_size * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size + i], dBre_acc[i]);
+		atomicAdd(&grad_weights[off_A_re + w_idx], static_cast<T>(dAre_acc[i]));
+		atomicAdd(&grad_weights[off_A_im + w_idx], static_cast<T>(dAim_acc[i]));
+		atomicAdd(&grad_weights[mamba_d_inner + block_ch_idx / mamba_mimo_group_size * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size + i], static_cast<T>(dBre_acc[i]));
 	}
 }
 template <int dummy = 0>
@@ -1278,8 +1243,8 @@ __global__ void __launch_bounds__(gpu_block_threads, 4) huberKernel(const __half
 	for (int offset = 16; offset > 0; offset >>= 1) thread_sum += __shfl_xor_sync(0xFFFFFFFF, thread_sum, offset);
 	if ((threadIdx.x & 31) == 0) atomicAdd(out_loss, thread_sum);
 }
-template <int dummy = 0>
-__global__ void __launch_bounds__(gpu_block_threads, 4) huberGradOutputKernel(const __half* __restrict__ pred, const __half* __restrict__ real, __half* __restrict__ grad_output, int spatial_size, int channels, float score_factor, float delta)
+template <typename T = __half>
+__global__ void __launch_bounds__(gpu_block_threads, 4) huberGradOutputKernel(const __half* __restrict__ pred, const __half* __restrict__ real, T* __restrict__ grad_output, int spatial_size, int channels, float score_factor, float delta)
 {
 	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= channels) return;
@@ -1301,7 +1266,7 @@ __global__ void __launch_bounds__(gpu_block_threads, 4) huberGradOutputKernel(co
 	float thread_sum = 0.0f;
 	#pragma unroll
 	for (int i = 0; i < 2; i++) thread_sum += sum[i << 1] + sum[(i << 1) + 1];
-	if (thread_sum != 0.0f) atomicAddHalfFloat(&grad_output[idx], thread_sum * factor);
+	if (thread_sum != 0.0f) atomicAdd(&grad_output[idx], static_cast<T>(thread_sum * factor));
 }
 __host__ __device__ __forceinline__ constexpr int constexpr_clz(unsigned int x)
 {

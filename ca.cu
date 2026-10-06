@@ -127,7 +127,7 @@ extern "C" {
 	{
 		auto* state = reinterpret_cast<InternalCudaAudioState*>(state_ptr);
 		const int buf_idx = state->current_audio_buffer.load(std::memory_order_acquire);
-		state->audio_buffer[buf_idx].fill(0, state->audio_buffer[buf_idx].size(), h_zero(), state->stream_audio.get());
+		state->audio_buffer[buf_idx].fill(0, state->audio_buffer[buf_idx].size(), 0, state->stream_audio.get());
 	}
 	void cudaSetDevice_audio()
 	{

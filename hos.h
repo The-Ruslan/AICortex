@@ -3,11 +3,12 @@
 #include "kernels.h"
 #include "exp.h"
 
+template<typename T = __half>
 struct EntropyOP
 {
-	__device__ __forceinline__ float operator()(const __half p_half) const
+	__device__ __forceinline__ float operator()(const T t_p) const
 	{
-		const float p = __half2float(p_half), q = 1.0f - p;
+		const float p = static_cast<float>(t_p), q = 1.0f - p;
 		return -1.442695f * fmaf(p, __logf(fmaxf(p, epsilon)), q * __logf(fmaxf(q, epsilon)));
 	}
 };
@@ -17,7 +18,6 @@ class HallOfShame
 private:
     const size_t exp_buffer_size_total, exp_main_range;
 	std::vector<S_Experience> entries, history_buffer;
-	universal_vector<float> loss;
 	size_t min_group_start = 0, history_index = 0;
 	float avg_ent = 1.0f, avg_huber = 0.01f, avg_shame_rolling = 1.0f;
 	static constexpr float momentum = 0.99f;
@@ -34,8 +34,7 @@ public:
 		exp_buffer_size_total(exp_mem_size_total),
 		exp_main_range(exp_buffer_size_total - exp_buffer_size_active),
 		entries(exp_buffer_size_total),
-		history_buffer(meta_seq_len),
-		loss(1, MemoryType::PinnedHost) {}
+		history_buffer(meta_seq_len) {}
 	void initData(uint8_t*& current_host_main_ptr, int blocks_data_size)
 	{
 		for (auto& entry : entries)
@@ -55,13 +54,10 @@ public:
 			entry_hb.blocks_data_scales.resize(entry.blocks_data_scales.data(), entry.blocks_data_scales.size(), MemoryType::PinnedHost);
 		}
 	}
-	void addEntry(const S_Experience& exp, universal_vector<__half>& output_fwd, universal_vector<__half>& probs_fwd, universal_vector<__half>& output_predictor, cudaStream_t stream = 0)
+	void addEntry(const S_Experience& exp, universal_vector<__half>& probs_fwd, float predicted_score, float real_score, cudaStream_t stream = 0)
 	{
-		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP{}, probs_fwd.size(), stream) / probs_fwd.size();
-		loss[0] = 0.0f;
-		LAUNCH_KERNEL(huberKernel<>, (((output_predictor.size() + 7) >> 3) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream, output_predictor.data(), output_fwd.data(), loss.data(), output_predictor.size(), getHuberDelta());
-		checkCudaError(cudaStreamSynchronize(stream));
-		const float predict_err = *const_cast<volatile float*>(loss.data()) / output_fwd.size();
+		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP<std::remove_pointer_t<decltype(probs_fwd.data())>>{}, probs_fwd.size(), stream) / probs_fwd.size();
+		const float predict_err = std::abs(predicted_score - real_score);
 		avg_ent = fmaf(momentum, avg_ent, (1.0f - momentum) * entropy_sum);
 		avg_huber = fmaf(momentum, avg_huber, (1.0f - momentum) * predict_err);
 		const float shame_score = entropy_sum / (avg_ent + epsilon) + predict_err / (avg_huber + epsilon);

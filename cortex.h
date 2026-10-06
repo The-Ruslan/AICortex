@@ -8,17 +8,11 @@
 #include "critic.h"
 #include "cc.h"
 
-inline constexpr float constexpr_pow(float base, int exp)
-{
-    float result = 1.0f;
-    for (int i = 0; i < exp; ++i) result *= base;
-    return result;
-}
-
+template<typename T_ogp = __half, typename T_eop = __half>
 struct BackwardStepOP
 {
-	__half* output_grad_ptr;
-	const __half* exp_output_ptr;
+	T_ogp* output_grad_ptr;
+	const T_eop* exp_output_ptr;
 	const action_type* exp_action_ptr;
 	const float score_val;
 	__device__ void operator()(size_t i) const
@@ -45,65 +39,129 @@ struct BackwardStepOP
 				shift = k_adj & (total_bits_per_element - 1);
 			}
 		}
-		output_grad_ptr[i] = __float2half(score_val * ((test_bit(exp_action_ptr[target_idx], shift) ? 1.0f : 0.0f) - __half2float(exp_output_ptr[i])));
+		output_grad_ptr[i] = static_cast<T_ogp>(score_val * (static_cast<float>(test_bit(exp_action_ptr[target_idx], shift)) - static_cast<float>(exp_output_ptr[i])));
 	}
 };
+template <typename T_gradient = __half, typename T_weight = __half>
 struct BackwardMetaOP
 {
-	__half* __restrict__ g_sum;
-	__half** __restrict__ a_ptrs;
-	const __half* __restrict__ b_raw;
+	T_gradient* __restrict__ g_sum;
+	void** __restrict__ a_ptrs;
+	const T_gradient* __restrict__ b_raw;
 	const size_t* __restrict__ topo_offsets;
 	const size_t* __restrict__ topo_sizes;
-	const __half2 factor2;
+	const float factor;
 	__device__ void operator()(size_t tensor_idx) const
 	{
-		__half* __restrict__ a_base_ptr = a_ptrs[tensor_idx];
 		const size_t global_start_offset = topo_offsets[tensor_idx];
-		const size_t num_u4 = topo_sizes[tensor_idx] >> 3;
-		#pragma unroll 2
-		for (size_t u4_idx = 0; u4_idx < num_u4; ++u4_idx)
+		const size_t total_elements = topo_sizes[tensor_idx];
+		constexpr int grad_elements_per_uint4 = sizeof(uint4) / sizeof(T_gradient),
+					  weight_elements_per_uint4 = sizeof(uint4) / sizeof(T_weight),
+					  bias_elements_per_uint4 = sizeof(uint4) / sizeof(__half);
+		constexpr float factor_const = 0.0001f;
+		if (tensor_idx & 1)
 		{
-			const size_t local_idx = u4_idx << 3;
-			const size_t global_idx = global_start_offset + local_idx;
-			const uint4 a_val = *reinterpret_cast<const uint4*>(a_base_ptr + local_idx);
-			const auto& a_h2 = reinterpret_cast<const __half2(&)[4]>(a_val);
-			const uint4 b_val = *reinterpret_cast<const uint4*>(b_raw + global_idx);
-			const auto& b_h2 = reinterpret_cast<const __half2(&)[4]>(b_val);
-			uint4* __restrict__ mgs_ptr = reinterpret_cast<uint4*>(g_sum + global_idx);
-			uint4 raw_sum = *mgs_ptr;
-			auto& h2_sum = reinterpret_cast<__half2(&)[4]>(raw_sum);
-			#pragma unroll
-			for(int j = 0; j < 4; j++) h2_sum[j] = __hfma2(__hfma2(a_h2[j], __half2_raw{0x068E, 0x068E}, __hsub2(a_h2[j], b_h2[j])), factor2, h2_sum[j]);
-			*mgs_ptr = raw_sum;
+			__half* __restrict__ bias_ptr = static_cast<__half*>(a_ptrs[tensor_idx]);
+			const size_t size_v4 = total_elements / bias_elements_per_uint4;
+			#pragma unroll 2
+			for (size_t v_idx = 0; v_idx < size_v4; ++v_idx)
+			{
+				const size_t local_idx = v_idx * bias_elements_per_uint4;
+				const size_t global_idx = global_start_offset + v_idx * grad_elements_per_uint4;
+				const uint4 a_val = *reinterpret_cast<const uint4*>(bias_ptr + local_idx);
+				const uint4 b_val = *reinterpret_cast<const uint4*>(b_raw + global_idx);
+				uint4* __restrict__ mgs_ptr = reinterpret_cast<uint4*>(g_sum + global_idx);
+				uint4 raw_sum = *mgs_ptr;
+				const auto& a_arr = reinterpret_cast<const __half(&)[bias_elements_per_uint4]>(a_val);
+				const auto& b_arr = reinterpret_cast<const T_gradient(&)[grad_elements_per_uint4]>(b_val);
+				auto& sum_arr = reinterpret_cast<T_gradient(&)[grad_elements_per_uint4]>(raw_sum);
+				#pragma unroll
+				for (int j = 0; j < grad_elements_per_uint4; ++j)
+				{
+					const float a = __half2float(a_arr[j]);
+					sum_arr[j] = static_cast<T_gradient>(fmaf(fmaf(a, factor_const, a - static_cast<float>(b_arr[j])), factor, static_cast<float>(sum_arr[j])));
+				}
+				*mgs_ptr = raw_sum;
+			}
+		}
+		else
+		{
+			T_weight* __restrict__ weight_ptr = static_cast<T_weight*>(a_ptrs[tensor_idx]);
+			const size_t size_v4 = total_elements / weight_elements_per_uint4;
+			#pragma unroll 2
+			for (size_t v_idx = 0; v_idx < size_v4; ++v_idx)
+			{
+				const size_t local_idx = v_idx * weight_elements_per_uint4;
+				const size_t global_idx = global_start_offset + v_idx * grad_elements_per_uint4;
+				const uint4 a_val = *reinterpret_cast<const uint4*>(weight_ptr + local_idx);
+				const uint4 b_val = *reinterpret_cast<const uint4*>(b_raw + global_idx);
+				uint4* __restrict__ mgs_ptr = reinterpret_cast<uint4*>(g_sum + global_idx);
+				uint4 raw_sum = *mgs_ptr;
+				const auto& a_arr = reinterpret_cast<const T_weight(&)[weight_elements_per_uint4]>(a_val);
+				const auto& b_arr = reinterpret_cast<const T_gradient(&)[grad_elements_per_uint4]>(b_val);
+				auto& sum_arr = reinterpret_cast<T_gradient(&)[grad_elements_per_uint4]>(raw_sum);
+				#pragma unroll
+				for (int j = 0; j < grad_elements_per_uint4; ++j)
+				{
+					const float a = static_cast<float>(a_arr[j]);
+					sum_arr[j] = static_cast<T_gradient>(fmaf(fmaf(a, factor_const, a - static_cast<float>(b_arr[j])), factor, static_cast<float>(sum_arr[j])));
+				}
+				*mgs_ptr = raw_sum;
+			}
 		}
 	}
 };
+template <typename T_gradient = __half, typename T_weight = __half>
 struct BackwardScaleOP
 {
-	__half** __restrict__ target_raw;
-	const __half* __restrict__ a_raw;
+	void** __restrict__ target_raw;
+	const T_gradient* __restrict__ a_raw;
 	const size_t* __restrict__ topo_offsets;
 	const size_t* __restrict__ topo_sizes;
-	const __half2 meta_scale2;
-	const __half2 meta_lr2_inv;
+	const float meta_scale;
+	const float meta_lr_inv;
 	__device__ void operator()(size_t tensor_idx) const
 	{
-		__half* __restrict__ layer_target_ptr = target_raw[tensor_idx];
 		const size_t global_start_offset = topo_offsets[tensor_idx];
-		const size_t num_u4 = topo_sizes[tensor_idx] >> 3;
-		#pragma unroll 2
-		for (size_t u4_idx = 0; u4_idx < num_u4; ++u4_idx)
+		const size_t total_elements = topo_sizes[tensor_idx];
+		constexpr int grad_elements_per_uint4 = sizeof(uint4) / sizeof(T_gradient),
+					  weight_elements_per_uint4 = sizeof(uint4) / sizeof(T_weight),
+					  bias_elements_per_uint4 = sizeof(uint4) / sizeof(__half);
+		if (tensor_idx & 1)
 		{
-			const size_t local_idx = u4_idx << 3;
-			uint4* __restrict__ layer_w_v4_ptr = reinterpret_cast<uint4*>(layer_target_ptr + local_idx);
-			uint4 raw_w = *layer_w_v4_ptr;
-			auto& h2_w = reinterpret_cast<__half2(&)[4]>(raw_w);
-			const uint4 raw_sum = *reinterpret_cast<const uint4*>(a_raw + global_start_offset + local_idx);
-			const auto& h2_sum = reinterpret_cast<const __half2(&)[4]>(raw_sum);
-			#pragma unroll
-			for (int j = 0; j < 4; ++j) h2_w[j] = __hfma2(__hmul2(h2_sum[j], meta_scale2), meta_lr2_inv, h2_w[j]);
-			*layer_w_v4_ptr = raw_w;
+			__half* __restrict__ bias_target_ptr = static_cast<__half*>(target_raw[tensor_idx]);
+			const size_t size_v4 = total_elements / bias_elements_per_uint4;
+			#pragma unroll 2
+			for (size_t v_idx = 0; v_idx < size_v4; ++v_idx)
+			{
+				const size_t local_idx = v_idx * bias_elements_per_uint4;
+				uint4* __restrict__ layer_w_v4_ptr = reinterpret_cast<uint4*>(bias_target_ptr + local_idx);
+				uint4 raw_w = *layer_w_v4_ptr;
+				const uint4 raw_sum = *reinterpret_cast<const uint4*>(a_raw + global_start_offset + local_idx);
+				auto& w_arr = reinterpret_cast<__half(&)[bias_elements_per_uint4]>(raw_w);
+				const auto& sum_arr = reinterpret_cast<const T_gradient(&)[grad_elements_per_uint4]>(raw_sum);
+				#pragma unroll
+				for (int j = 0; j < grad_elements_per_uint4; ++j) w_arr[j] = __float2half(fmaf(static_cast<float>(sum_arr[j]) * meta_scale, meta_lr_inv, __half2float(w_arr[j])));
+				*layer_w_v4_ptr = raw_w;
+			}
+		}
+		else
+		{
+			T_weight* __restrict__ weight_target_ptr = static_cast<T_weight*>(target_raw[tensor_idx]);
+			const size_t size_v4 = total_elements / weight_elements_per_uint4;
+			#pragma unroll 2
+			for (size_t v_idx = 0; v_idx < size_v4; ++v_idx)
+			{
+				const size_t local_idx = v_idx * weight_elements_per_uint4;
+				uint4* __restrict__ layer_w_v4_ptr = reinterpret_cast<uint4*>(weight_target_ptr + local_idx);
+				uint4 raw_w = *layer_w_v4_ptr;
+				const uint4 raw_sum = *reinterpret_cast<const uint4*>(a_raw + global_start_offset + local_idx);
+				auto& w_arr = reinterpret_cast<T_weight(&)[weight_elements_per_uint4]>(raw_w);
+				const auto& sum_arr = reinterpret_cast<const T_gradient(&)[grad_elements_per_uint4]>(raw_sum);
+				#pragma unroll
+				for (int j = 0; j < grad_elements_per_uint4; ++j) w_arr[j] = static_cast<T_weight>(fmaf(static_cast<float>(sum_arr[j]) * meta_scale, meta_lr_inv, static_cast<float>(w_arr[j])));
+				*layer_w_v4_ptr = raw_w;
+			}
 		}
 	}
 };
@@ -122,7 +180,7 @@ private:
 	std::vector<std::unique_ptr<Block>> blocks;
 	std::unique_ptr<CaptureScreen> screenCapture;
 	std::unique_ptr<CaptureAudio> audioCapture;
-	std::unique_ptr<MambaBlock> mamba, predictor;
+	std::unique_ptr<MambaBlock> mamba;
 	std::unique_ptr<HallOfShame> hall_of_shame;
 	std::unique_ptr<Critic> critic;
 	std::unique_ptr<ConvergenceController> convergence_controller;
@@ -130,11 +188,12 @@ private:
 	unique_stream stream_backward{nullptr};
 	unique_stream stream_exp{nullptr};
 	universal_vector<uint8_t> global_device_main_arena, global_device_side_arena, global_host_main_arena, global_host_side_arena;
-	universal_vector<__half> raw_visaud_fwd, output_fwd, probs_fwd, output_predictor, probs_predictor, grad_output, grad_input, meta_backup_data, meta_gradient_sum;
+	universal_vector<__half> raw_visaud_fwd, output_fwd, probs_fwd, grad_output;
+	universal_vector<type_gradients> grad_input, meta_backup_data, meta_gradient_sum;
 	universal_vector<uint32_t> blocks_data;
 	universal_vector<int8_t> blocks_data_scales;
 	universal_vector<action_type> action_ptr, action_prevs;
-	universal_vector<__half*> meta_adapted_data;
+	universal_vector<void*> meta_adapted_data;
 	universal_vector<size_t> meta_adapted_offsets, meta_global_offsets;
 	const std::string dir_path;
     std::thread addExpThread;
@@ -145,7 +204,7 @@ private:
 	std::condition_variable &cv_exp, &cv_running;
 	bool &exp_add, ready_to_receive_exp = false, &is_running, ready_to_update = false;
 	std::vector<uint8_t> &keybinds;
-	__half learning_rate;
+	float learning_rate;
 	E_BackwardStrategy next_backward_strategy = E_BackwardStrategy::STANDARD;
 	std::atomic<bool> exp_is_dirty{false};
 	void executeActions()
@@ -207,8 +266,8 @@ private:
 		addExpThread = std::thread([this]()
 		{
 			checkCudaError(cudaSetDevice(0));
-			bool readyHOS = false, readyPred = false, ema_initialized = false, trigger_backward = false;
-			float ema_mean = 0.0f, ema_variance = 1.0f;
+			bool ema_initialized = false, has_last_score = false;
+			float ema_mean = 0.0f, ema_variance = 1.0f, last_score = fminimum;
 			constexpr float EMA_ALPHA = 0.05f, PEAK_Z_THRESHOLD = 1.8f;
 			while (true)
 			{
@@ -220,41 +279,31 @@ private:
 				}
 				if (exp_is_dirty.exchange(false, std::memory_order_acq_rel))
 				{
-					if (!readyPred)
+					critic->forward(exp.blocks_data.data(), exp.blocks_data_scales.data());
+					const float triggered_score = isScored.load(std::memory_order_acquire);
+					const float real_score = triggered_score > fminimum ? triggered_score : critic->get_score_output();
+					if (has_last_score && hall_of_shame) hall_of_shame->addEntry(exp, probs_fwd, last_score, real_score, stream_exp.get());
+					else has_last_score = true;
+					exp_add = false;
+					ready_to_receive_exp = false;
+					cv_exp.notify_all();
+					last_score = real_score;
+					if (hall_of_shame) hall_of_shame->updateEntries(stream_exp.get());
+					if (work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_USER_CRITIC_ONLY && work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER)
 					{
-						readyPred = true;
-						exp_add = false;
-						ready_to_receive_exp = false;
-						cv_exp.notify_all();
-					}
-					else
-					{
-						if (!readyHOS && hall_of_shame) readyHOS = true;
-						else if (hall_of_shame) hall_of_shame->addEntry(exp, output_fwd, probs_fwd, output_predictor, stream_exp.get());
-						if (predictor) predictor->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
-						critic->forward(exp.blocks_data.data(), exp.blocks_data_scales.data());
-						exp_add = false;
-						ready_to_receive_exp = false;
-						cv_exp.notify_all();
-						if (hall_of_shame) hall_of_shame->updateEntries(stream_exp.get());
-						if (work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_USER_CRITIC_ONLY && work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER)
+						if (!ema_initialized)
 						{
-							const float critic_score_output = critic->get_score_output();
-							trigger_backward = false;
-							if (!ema_initialized)
-							{
-								ema_mean = critic_score_output;
-								ema_initialized = true;
-							}
-							else
-							{
-								const float dynamic_min_std = std::abs(ema_mean) * EMA_ALPHA + epsilon;
-								trigger_backward = std::abs((critic_score_output - ema_mean) / std::sqrtf(fmaxf(ema_variance, dynamic_min_std * dynamic_min_std))) > PEAK_Z_THRESHOLD;
-								const float weight = trigger_backward ? EMA_ALPHA * 0.1f : EMA_ALPHA, diff = critic_score_output - ema_mean;
-								ema_mean = std::fmaf(weight, diff, ema_mean);
-								ema_variance = std::fmaf(weight, std::fmaf(diff, diff, -ema_variance), ema_variance);
-								if (trigger_backward) isScored.store(critic_score_output, std::memory_order_release);
-							}
+							ema_mean = real_score;
+							ema_initialized = true;
+						}
+						else
+						{
+							const float dynamic_min_std = std::abs(ema_mean) * EMA_ALPHA + epsilon;
+							const bool trigger_backward = std::abs((real_score - ema_mean) / std::sqrtf(fmaxf(ema_variance, dynamic_min_std * dynamic_min_std))) > PEAK_Z_THRESHOLD;
+							const float weight = trigger_backward ? EMA_ALPHA * 0.1f : EMA_ALPHA, diff = real_score - ema_mean;
+							ema_mean = std::fmaf(weight, diff, ema_mean);
+							ema_variance = std::fmaf(weight, std::fmaf(diff, diff, -ema_variance), ema_variance);
+							if (trigger_backward) isScored.store(real_score, std::memory_order_release);
 						}
 					}
 				}
@@ -268,18 +317,24 @@ private:
 			}
 		});
 	}
-	void collectNetworkData() { for (size_t i = 0; i < meta_adapted_data.size(); ++i) checkCudaError(cudaMemcpyAsync(meta_backup_data.data() + meta_global_offsets[i], meta_adapted_data[i], meta_adapted_offsets[i] * sizeof(__half), cudaMemcpyDefault, stream_backward.get())); }
-	void distributeNetworkData() { for (size_t i = 0; i < meta_adapted_data.size(); ++i) checkCudaError(cudaMemcpyAsync(meta_adapted_data[i], meta_backup_data.data() + meta_global_offsets[i], meta_adapted_offsets[i] * sizeof(__half), cudaMemcpyDefault, stream_backward.get())); }
+	void collectNetworkData()
+	{
+		uint8_t* backup_base = reinterpret_cast<uint8_t*>(meta_backup_data.data());
+		for (size_t i = 0; i < meta_adapted_data.size(); ++i) checkCudaError(cudaMemcpyAsync(backup_base + meta_global_offsets[i], meta_adapted_data[i], meta_adapted_offsets[i] * ((i & 1) == 0 ? sizeof(type_gradients) : sizeof(__half)), cudaMemcpyDefault, stream_backward.get()));
+	}
+	void distributeNetworkData()
+	{
+		uint8_t* backup_base = reinterpret_cast<uint8_t*>(meta_backup_data.data());
+		for (size_t i = 0; i < meta_adapted_data.size(); ++i) checkCudaError(cudaMemcpyAsync(meta_adapted_data[i], backup_base + meta_global_offsets[i], meta_adapted_offsets[i] * ((i & 1) == 0 ? sizeof(type_gradients) : sizeof(__half)), cudaMemcpyDefault, stream_backward.get()));
+	}
 	void performBackwardStep(float score, int epoch)
 	{
-		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP{}, probs_fwd.size(), stream_backward.get()) / probs_fwd.size();
+		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP<std::remove_pointer_t<decltype(probs_fwd.data())>>{}, probs_fwd.size(), stream_backward.get()) / probs_fwd.size();
 		score = fmaf(entropy_sum, fmaxf(0.001f, 0.01f * powf(0.999f, static_cast<float>(epoch))), score) * score_gamma;
-		grad_output.for_each_n(grad_output.size(), BackwardStepOP{grad_output.data(), probs_fwd.data(), action_ptr.data(), score}, stream_backward.get());
+		grad_output.for_each_n(grad_output.size(), BackwardStepOP<std::remove_pointer_t<decltype(grad_output.data())>, std::remove_pointer_t<decltype(probs_fwd.data())>>{grad_output.data(), probs_fwd.data(), action_ptr.data(), score}, stream_backward.get());
+		grad_input.fill(0, grad_input.size(), 0, stream_backward.get());
 		mamba->backward(grad_output, exp.visaud_fwd, exp.visaud_fwd_scales, grad_input);
 		for (int i = blocks.size() - 1; i > -1; i--) blocks[i]->backward(grad_input, blocks_data.data() + i * (blocks_data.size() / blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / blocks.size()), exp.stochasticDepth[i]);
-		grad_output.fill(0, grad_output.size(), h_zero(), stream_backward.get());
-		LAUNCH_KERNEL(huberGradOutputKernel<>, (probs_fwd.size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward.get(), output_predictor.data(), output_fwd.data(), grad_output.data(), output_fwd.size() / probs_fwd.size(), probs_fwd.size(), score, hall_of_shame->getHuberDelta());
-		predictor->backward(grad_output, exp.visaud_fwd, exp.visaud_fwd_scales, grad_input);
 		checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 	}
 	void performInference()
@@ -385,7 +440,6 @@ private:
 			global_device_side_arena.clear();
 			global_host_side_arena.clear();
 		}
-		predictor.reset();
 		hall_of_shame.reset();
 		convergence_controller.reset();
 	}
@@ -402,7 +456,7 @@ private:
 		const size_t num_sequences = shame_experiences.size() / meta_seq_len;
 		if (num_sequences < 1) return;
 		collectNetworkData();
-		meta_gradient_sum.fill(0, meta_gradient_sum.size(), h_zero(), stream_backward.get());
+		meta_gradient_sum.fill(0, meta_gradient_sum.size(), 0, stream_backward.get());
 		for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx)
 		{
 			distributeNetworkData(); 
@@ -411,27 +465,25 @@ private:
 			for (int inner_step = 0; inner_step < 5; ++inner_step)
 			{
 				mamba->reset(stream_backward.get());
-				predictor->reset(stream_backward.get());
 				for (size_t idx = 0; idx < meta_seq_len; ++idx)
 				{
 					auto* shame_exp = shame_experiences[start_idx + idx];
 					exp(*shame_exp, stream_backward.get());
 					performForward(true);
-					if (idx == 0) predictor->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
 					if (inner_step == 0) final_shame_score += shame_exp->shame_score;
 					if (inner_step == 4) shame_exp->shame_score = fminimum;
 				}
 				performBackwardStep(final_shame_score / meta_seq_len * score * (1.0f / shame_experiences[start_idx + meta_seq_len - 1]->past_pass_count), epoch);
 			}
-			meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardMetaOP{meta_gradient_sum.data(), meta_adapted_data.data(), meta_backup_data.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), __float2half2_rn(final_shame_score)}, stream_backward.get());
+			meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardMetaOP<std::remove_pointer_t<decltype(meta_gradient_sum.data())>, type_gradients>{meta_gradient_sum.data(), meta_adapted_data.data(), meta_backup_data.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), final_shame_score}, stream_backward.get());
 			if ((seq_idx & 3) == 3)
 			{
 				checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			}
 		}
-		const __half2 meta_lr2_inv = __float2half2_rn(-1.0f * (0.01f - 1.0f / (1.0f + std::expf(-0.001f * (epoch - 2000))) * (0.01f - 0.003f)));
-		meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardScaleOP{meta_adapted_data.data(), meta_gradient_sum.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), __float2half2_rn(1.0f / num_sequences), meta_lr2_inv}, stream_backward.get());
+		const float meta_lr_inv = -1.0f * (0.01f - 1.0f / (1.0f + std::expf(-0.001f * (epoch - 2000))) * (0.01f - 0.003f));
+		meta_adapted_data.for_each_n(meta_adapted_data.size(), BackwardScaleOP<std::remove_pointer_t<decltype(meta_gradient_sum.data())>, type_gradients>{meta_adapted_data.data(), meta_gradient_sum.data(), meta_global_offsets.data(), meta_adapted_offsets.data(), 1.0f / num_sequences, meta_lr_inv}, stream_backward.get());
 	}
 	void performBackwardStandard(float score, int epoch)
 	{
@@ -442,7 +494,6 @@ private:
 		for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx)
 		{
 			mamba->reset(stream_backward.get());
-			predictor->reset(stream_backward.get());
 			const size_t start_idx = seq_idx * meta_seq_len;
 			float final_shame_score = 0.0f;
 			for (size_t idx = 0; idx < meta_seq_len; ++idx)
@@ -450,7 +501,6 @@ private:
 				auto* shame_exp = shame_experiences[start_idx + idx];
 				exp(*shame_exp, stream_backward.get());
 				performForward(true);
-				if (idx == 0) predictor->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
 				final_shame_score += shame_exp->shame_score;
 				shame_exp->shame_score = fminimum;
 			}
@@ -478,12 +528,13 @@ private:
 			if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER) critic->backward(score);
 			if (next_backward_strategy == E_BackwardStrategy::META)
 			{
-				std::cout << "[SYSTEM LOG] Executing meta-learning algorythm for adaptation..." << std::endl;
+				std::cout << "[SYSTEM LOG] Executing meta algorythm for adaptation..." << std::endl;
 				performBackwardMeta(score, epoch);
 				if (convergence_controller) next_backward_strategy = convergence_controller->updateAndGetStrategy(meta_gradient_sum, stream_backward.get(), true);
 			}
 			else
 			{
+				std::cout << "[SYSTEM LOG] Executing standard algorythm for adaptation..." << std::endl;
 				performBackwardStandard(score, epoch);
 				if (convergence_controller) next_backward_strategy = convergence_controller->updateAndGetStrategy(grad_input, stream_backward.get(), false);
 			}
@@ -495,7 +546,6 @@ private:
 			else
 			{
 				mamba->reset(stream_backward.get());
-				predictor->reset(stream_backward.get());
 				critic->reset(stream_backward.get());
 			}
 		}
@@ -525,7 +575,6 @@ public:
 			{
 				for (int i = 0; i < blocks.size(); i++) blocks[i]->saveToFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
 				mamba->saveToFile((std::filesystem::path(dir_path) / "mamba.bin").string());
-				if (predictor) predictor->saveToFile((std::filesystem::path(dir_path) / "predictor.bin").string());
 				if (critic) critic->saveToFile((std::filesystem::path(dir_path) / "critic.bin").string());
 				std::cout << "[SYSTEM LOG] Data saved successfully to network folder." << std::endl;
 				success = true;
@@ -558,7 +607,6 @@ public:
 			{
 				for (int i = 0; i < blocks.size(); i++) blocks[i]->loadFromFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
 				mamba->loadFromFile((std::filesystem::path(dir_path) / "mamba.bin").string());
-				if (predictor) predictor->loadFromFile((std::filesystem::path(dir_path) / "predictor.bin").string());
 				if (critic) critic->loadFromFile((std::filesystem::path(dir_path) / "critic.bin").string());
 				std::cout << "[SYSTEM LOG] Data loaded successfully from network folder." << std::endl;
 				success = true;
@@ -579,7 +627,7 @@ public:
 		   std::condition_variable& cvExp, std::condition_variable& cvRunning,
 		   bool& expAdd, bool& isRunning, std::atomic<bool>& isInputing, std::vector<uint8_t>& key_binds,
 		   size_t computationSpeed = 30,
-		   float learningRate = 0.001f,
+		   float learningRate = 0.0001f,
 		   size_t exp_buffer_size_total = meta_seq_len * meta_seq_len,
 		   size_t exp_buffer_size_active = meta_seq_len * 2) :
 		work_mode(working_mode), isEliminating(is_eliminating), isScored(is_scored),
@@ -588,7 +636,7 @@ public:
 		exp_add(expAdd), is_running(isRunning), is_inputing(isInputing), keybinds(key_binds),
 		fps(computationSpeed),
 		dir_path(process_conf_path),
-		learning_rate(__float2half(learningRate))
+		learning_rate(learningRate)
 	{
 		cudaStream_t temp_stream_fwd, temp_stream_bwd, temp_stream_exp;
         checkCudaError(cudaStreamCreate(&temp_stream_fwd));
@@ -611,7 +659,7 @@ public:
 													 stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
 													 &pipo_db, &pipo_db_num_groups, std::min(3 + (i & ~1), 11),
 													 get_gen_value(1.0f - i * 0.5f * inv_depth), stream_backward.get(),
-													 &learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
+													 learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
 													 &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
 			dimension_old = dimension;
 		}
@@ -619,31 +667,30 @@ public:
 		const bool is_in_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE || work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE_ON_TRAIN;
 		const bool is_in_inference_on_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE;
 		const bool is_in_inference_on_critic_only = work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY;
-		mamba = std::make_unique<MambaBlock>(output_channels_mamba, dimension, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), &fps, &learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
+		mamba = std::make_unique<MambaBlock>(output_channels_mamba, dimension, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), &fps, learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
 		if (!is_in_inference && !is_in_inference_on_critic_only)
 		{
-			predictor = std::make_unique<MambaBlock>(output_channels_mamba, dimension, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), nullptr, &learning_rate, penalty_val, &total_device_bytes_side, &total_host_bytes_side, &total_learnable_data, &total_learnable_data_count);
 			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total, exp_buffer_size_active);
 			convergence_controller = std::make_unique<ConvergenceController>();
 		}
-		if (!is_in_inference_on_inference) critic = std::make_unique<Critic>(input_channels_first, ((input_channels_first << 2) + 31) & ~31, img_resolution, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), &learning_rate, penalty_val, &total_device_bytes_side);
+		if (!is_in_inference_on_inference) critic = std::make_unique<Critic>(input_channels_first, ((input_channels_first << 2) + 31) & ~31, img_resolution, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_side);
 		screenCapture = std::make_unique<CaptureScreen>(work_mode, isEliminating, is_running, mtx_running, cv_running, &total_device_bytes_main);
 		audioCapture = std::make_unique<CaptureAudio>(isEliminating, is_running, mtx_running, cv_running, &total_device_bytes_main);
 		constexpr size_t blocks_data_size = (img_resolution * img_resolution * input_channels_first) >> 5;
 		total_device_bytes_main += align16(pipo_db_num_groups * sizeof(uint32_t) << 2) * 2 + align16(pipo_db_num_groups * sizeof(int8_t)) * 2;
-		total_device_bytes_side += align16(total_size_grad_weights * sizeof(__half)) +
+		total_device_bytes_side += align16(total_size_grad_weights * sizeof(type_gradients)) +
 								   align16(total_size_grad_biases * sizeof(__half)) +
 								   align16(blocks_data_size * sizeof(uint32_t) << 2) +
 								   align16(blocks_data_size * sizeof(int8_t)) +
 								   align16(blocks.size() * pipo_db_num_groups * sizeof(uint32_t) << 2) +
 								   align16(blocks.size() * pipo_db_num_groups * sizeof(int8_t)) +
 								   align16(mamba_h_states_size * sizeof(float)) * 2 +
-								   align16(pipo_db * sizeof(__half)) * 4 +
+								   align16(pipo_db * sizeof(type_gradients)) * 4 +
 								   align16(output_channels_mamba * sizeof(__half)) +
-								   align16(total_learnable_data * sizeof(__half)) * 2 +
+								   align16(total_learnable_data * sizeof(type_gradients)) * 2 +
 								   align16(mamba_output_size * sizeof(__half));
 		total_host_bytes_main += align16((output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type)) * 2;
-		total_host_bytes_side += (align16(blocks_data_size * sizeof(uint32_t) << 2) + align16(blocks_data_size * sizeof(int8_t))) * exp_buffer_size_total + align16(total_learnable_data_count * sizeof(size_t)) * 2 + align16(total_learnable_data_count * sizeof(__half*));
+		total_host_bytes_side += (align16(blocks_data_size * sizeof(uint32_t) << 2) + align16(blocks_data_size * sizeof(int8_t))) * exp_buffer_size_total + align16(total_learnable_data_count * sizeof(size_t)) * 2 + align16(total_learnable_data_count * sizeof(void*));
 		global_device_main_arena.resize(total_device_bytes_main, 0, MemoryType::Device);
 		global_device_side_arena.resize(total_device_bytes_side, 0, MemoryType::Device);
 		global_host_main_arena.resize(total_host_bytes_main, 0, MemoryType::PinnedHost);
@@ -657,28 +704,28 @@ public:
 		exp.visaud_fwd_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_b_scales), pipo_db_num_groups, MemoryType::Device);
 		uint8_t* dev_main_ptr = dev_main_ptr_buffer_b_scales + align16(pipo_db_num_groups * sizeof(int8_t));
 		uint8_t* dev_side_ptr_weights = global_device_side_arena.data();
-		uint8_t* dev_side_ptr_biases = dev_side_ptr_weights + align16(total_size_grad_weights * sizeof(__half));
+		uint8_t* dev_side_ptr_biases = dev_side_ptr_weights + align16(total_size_grad_weights * sizeof(type_gradients));
 		uint8_t* dev_side_ptr_grad_buffer_a = dev_side_ptr_biases + align16(total_size_grad_biases * sizeof(__half));
-		uint8_t* dev_side_ptr_grad_buffer_b = dev_side_ptr_grad_buffer_a + align16(pipo_db * sizeof(__half));
-		uint8_t* dev_side_ptr_grad_residual = dev_side_ptr_grad_buffer_b + align16(pipo_db * sizeof(__half));
-		uint8_t* dev_side_ptr = dev_side_ptr_grad_residual + align16(pipo_db * sizeof(__half));
+		uint8_t* dev_side_ptr_grad_buffer_b = dev_side_ptr_grad_buffer_a + align16(pipo_db * sizeof(type_gradients));
+		uint8_t* dev_side_ptr_grad_residual = dev_side_ptr_grad_buffer_b + align16(pipo_db * sizeof(type_gradients));
+		uint8_t* dev_side_ptr = dev_side_ptr_grad_residual + align16(pipo_db * sizeof(type_gradients));
 		uint8_t* host_main_ptr = global_host_main_arena.data();
 		uint8_t* host_side_ptr = global_host_side_arena.data();
-		w_bytes = align16(total_learnable_data_count * sizeof(__half*));
-		meta_adapted_data.resize(reinterpret_cast<__half**>(host_side_ptr), total_learnable_data_count, MemoryType::PinnedHost);
+		w_bytes = align16(total_learnable_data_count * sizeof(void*));
+		meta_adapted_data.resize(reinterpret_cast<void**>(host_side_ptr), total_learnable_data_count, MemoryType::PinnedHost);
 		host_side_ptr += w_bytes;
 		w_bytes = align16(total_learnable_data_count * sizeof(size_t));
 		meta_adapted_offsets.resize(reinterpret_cast<size_t*>(host_side_ptr), total_learnable_data_count, MemoryType::PinnedHost);
 		host_side_ptr += w_bytes;
 		meta_global_offsets.resize(reinterpret_cast<size_t*>(host_side_ptr), total_learnable_data_count, MemoryType::PinnedHost);
 		host_side_ptr += w_bytes;
-		__half** host_mad_ptr = meta_adapted_data.data();
+		void** host_mad_ptr = meta_adapted_data.data();
 		size_t* host_mao_ptr = meta_adapted_offsets.data();
 		screenCapture->initData(dev_main_ptr);
 		audioCapture->initData(dev_main_ptr);
 		for(int i = 0; i < depth; ++i) blocks[i]->initData(isLoaded, (std::filesystem::path(dir_path) / std::to_string(i)).string(), dev_main_ptr, host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr, dev_side_ptr_grad_buffer_a, dev_side_ptr_grad_buffer_b, dev_side_ptr_grad_residual, dev_main_ptr_buffer_a, dev_main_ptr_buffer_a_scales, dev_main_ptr_buffer_b, dev_main_ptr_buffer_b_scales);
-		output_fwd.resize(reinterpret_cast<__half*>(dev_main_ptr), mamba_output_size, MemoryType::Device);
-		probs_fwd.resize(reinterpret_cast<__half*>(dev_main_ptr) + mamba_output_size - output_channels_mamba, output_channels_mamba, MemoryType::Device);
+		output_fwd.resize(reinterpret_cast<std::remove_pointer_t<decltype(output_fwd.data())>*>(dev_main_ptr), mamba_output_size, MemoryType::Device);
+		probs_fwd.resize(reinterpret_cast<std::remove_pointer_t<decltype(probs_fwd.data())>*>(dev_main_ptr) + mamba_output_size - output_channels_mamba, output_channels_mamba, MemoryType::Device);
 		mamba->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba.bin").string(), dev_main_ptr, host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr);
 		w_bytes = align16((output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type));
 		action_ptr.resize(reinterpret_cast<action_type*>(host_main_ptr), (output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element, 0, MemoryType::PinnedHost);
@@ -692,12 +739,6 @@ public:
 		w_bytes = align16(blocks_data_size * sizeof(int8_t));
 		exp.blocks_data_scales.resize(reinterpret_cast<int8_t*>(dev_side_ptr), blocks_data_size, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		if (predictor)
-		{
-			output_predictor.resize(reinterpret_cast<__half*>(dev_side_ptr), mamba_output_size, MemoryType::Device);
-			probs_predictor.resize(reinterpret_cast<__half*>(dev_side_ptr) + mamba_output_size - output_channels_mamba, output_channels_mamba, MemoryType::Device);
-			predictor->initData(isLoaded, (std::filesystem::path(dir_path) / "predictor.bin").string(), dev_side_ptr, host_side_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr);
-		}
 		if (hall_of_shame) hall_of_shame->initData(host_side_ptr, blocks_data_size);
 		w_bytes = align16(blocks.size() * pipo_db_num_groups * sizeof(uint32_t) << 2);
 		blocks_data.resize(reinterpret_cast<uint32_t*>(dev_side_ptr), blocks.size() * pipo_db_num_groups << 2, MemoryType::Device);
@@ -705,17 +746,17 @@ public:
 		w_bytes = align16(blocks.size() * pipo_db_num_groups * sizeof(int8_t));
 		blocks_data_scales.resize(reinterpret_cast<int8_t*>(dev_side_ptr), blocks.size() * pipo_db_num_groups, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		w_bytes = align16(output_channels_mamba * sizeof(__half));
-		grad_output.resize(reinterpret_cast<__half*>(dev_side_ptr), output_channels_mamba, MemoryType::Device);
+		w_bytes = align16(output_channels_mamba * sizeof(std::remove_pointer_t<decltype(grad_output.data())>));
+		grad_output.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_output.data())>*>(dev_side_ptr), output_channels_mamba, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		w_bytes = align16(pipo_db * sizeof(__half));
-		grad_input.resize(reinterpret_cast<__half*>(dev_side_ptr), pipo_db, MemoryType::Device);
+		w_bytes = align16(pipo_db * sizeof(std::remove_pointer_t<decltype(grad_input.data())>));
+		grad_input.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_input.data())>*>(dev_side_ptr), pipo_db, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		w_bytes = align16(total_learnable_data * sizeof(__half));
-		meta_backup_data.resize(reinterpret_cast<__half*>(dev_side_ptr), total_learnable_data, MemoryType::Device);
+		w_bytes = align16(total_learnable_data * sizeof(std::remove_pointer_t<decltype(meta_backup_data.data())>));
+		meta_backup_data.resize(reinterpret_cast<std::remove_pointer_t<decltype(meta_backup_data.data())>*>(dev_side_ptr), total_learnable_data, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		w_bytes = align16(total_learnable_data * sizeof(__half));
-		meta_gradient_sum.resize(reinterpret_cast<__half*>(dev_side_ptr), total_learnable_data, MemoryType::Device);
+		w_bytes = align16(total_learnable_data * sizeof(std::remove_pointer_t<decltype(meta_gradient_sum.data())>));
+		meta_gradient_sum.resize(reinterpret_cast<std::remove_pointer_t<decltype(meta_gradient_sum.data())>*>(dev_side_ptr), total_learnable_data, MemoryType::Device);
 		dev_side_ptr += w_bytes;
 		size_t current_global_offset = 0;
 		for (size_t i = 0; i < meta_adapted_offsets.size(); ++i)

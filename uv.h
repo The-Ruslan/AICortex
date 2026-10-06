@@ -39,6 +39,7 @@ private:
 	template<typename KernelPtr>
     struct SizeCache { static size_t* get() { static size_t instance = 0; return &instance; } };
 public:
+	using value_type = T;
 	template<typename... Args>
 	size_t get_optimal_blocks(void (*kernel)(Args...)) const
 	{
@@ -66,7 +67,8 @@ public:
 	const T& operator[](size_t idx) const { return m_data[idx]; }
 	T* begin() { return m_data; }
 	T* end() { return m_data + m_size; }
-	void fill(size_t start, size_t end, T value, cudaStream_t stream = 0)
+	template<typename U>
+	void fill(size_t start, size_t end, U value, cudaStream_t stream = 0)
 	{
 		if (m_size == 0 || start >= end) return;
 		const size_t final_end = end < m_size ? end : m_size;
@@ -75,12 +77,12 @@ public:
 		if (m_mem_type == MemoryType::Device)
 		{
 			const size_t blocks = std::max<size_t>(1, std::min(get_optimal_blocks(fillUniversalVectorKernel<T>), (fill_elements + gpu_block_threads - 1) / gpu_block_threads));
-			LAUNCH_KERNEL(fillUniversalVectorKernel<T>, blocks, gpu_block_threads, 0, stream, m_data + start, value, fill_elements);
+			LAUNCH_KERNEL(fillUniversalVectorKernel<T>, blocks, gpu_block_threads, 0, stream, m_data + start, static_cast<T>(value), fill_elements);
 		}
 		else
 		{
 			if (stream != 0) checkCudaError(cudaStreamSynchronize(stream));
-			std::fill(m_data + start, m_data + final_end, value);
+			std::fill(m_data + start, m_data + final_end, static_cast<T>(value));
 		}
 	}
 	void copy(const universal_vector<T>& src, size_t dest_begin, size_t dest_end, size_t src_begin, size_t src_end, cudaStream_t stream = 0)
@@ -133,7 +135,8 @@ public:
 		if (new_size > m_capacity) reserve(new_size, mem_type);
 		m_size = new_size;
 	}
-	void resize(size_t new_size, T value, MemoryType mem_type = MemoryType::Default)
+	template<typename U>
+	void resize(size_t new_size, U value, MemoryType mem_type = MemoryType::Default)
 	{
 		if (m_size == new_size || m_mode == VectorMode::View) return;
 		if (new_size > m_capacity) reserve(new_size, mem_type);
@@ -148,7 +151,8 @@ public:
 		m_mem_type = mem_type;
 		m_mode = VectorMode::View;
 	}
-	void resize(T* external_ptr, size_t new_size, T value, MemoryType mem_type = MemoryType::Default)
+	template<typename U>
+	void resize(T* external_ptr, size_t new_size, U value, MemoryType mem_type = MemoryType::Default)
 	{
 		m_data = external_ptr;
 		m_size = new_size;
@@ -156,14 +160,6 @@ public:
 		m_mem_type = mem_type;
 		m_mode = VectorMode::View;
 		if (m_size > 0) fill(0, m_size, value);
-	}
-	void push_back(const T& value, cudaStream_t stream = 0)
-	{
-		if (m_mode == VectorMode::View) return;
-		if (m_size >= m_capacity) reserve(m_capacity == 0 ? 4 : m_capacity << 1);
-		if (m_mem_type == MemoryType::Device) checkCudaError(cudaMemcpyAsync(m_data + m_size, &value, sizeof(T), cudaMemcpyDefault, stream));
-		else m_data[m_size] = value;
-		m_size++;
 	}
 	universal_vector() = default;
 	universal_vector(size_t new_size, MemoryType mem_type = MemoryType::Device) { resize(new_size, mem_type); }
@@ -232,16 +228,20 @@ public:
 	Tout transform_reduce(Op op, size_t end, cudaStream_t stream = 0) const
 	{
 		if (m_size == 0 || end > m_size) return 0;
-		Tout* d_global_res = nullptr;
-		checkCudaError(cudaMalloc(&d_global_res, sizeof(Tout)));
-		checkCudaError(cudaMemset(d_global_res, 0, sizeof(Tout)));
+		struct DeviceResultCache
+		{
+			Tout* d_ptr = nullptr;
+			DeviceResultCache() { checkCudaError(cudaMalloc(&d_ptr, sizeof(Tout))); }
+			~DeviceResultCache() { if (d_ptr) cudaFree(d_ptr); }
+		};
+		static DeviceResultCache cache; 
+		checkCudaError(cudaMemsetAsync(cache.d_ptr, 0, sizeof(Tout), stream));
 		const size_t final_size = end < m_size ? end : m_size;
 		const size_t blocks = std::max<size_t>(1, std::min(get_optimal_blocks(transformReduceKernel<T, Tout, Op>), (final_size + gpu_block_threads - 1) / gpu_block_threads));
-		LAUNCH_KERNEL((transformReduceKernel<T, Tout, Op>), blocks, gpu_block_threads, 0, stream, m_data, d_global_res, op, final_size);
+		LAUNCH_KERNEL((transformReduceKernel<T, Tout, Op>), blocks, gpu_block_threads, 0, stream, m_data, cache.d_ptr, op, final_size);
 		checkCudaError(cudaStreamSynchronize(stream));
 		Tout host_result;
-		checkCudaError(cudaMemcpy(&host_result, d_global_res, sizeof(Tout), cudaMemcpyDefault));
-		checkCudaError(cudaFree(d_global_res));
+		checkCudaError(cudaMemcpy(&host_result, cache.d_ptr, sizeof(Tout), cudaMemcpyDefault));
 		return host_result;
 	}
 	template<typename Op>

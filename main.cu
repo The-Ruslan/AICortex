@@ -142,7 +142,7 @@ void inputUser(Cortex* cortex, HWND& hwnd,
 				}
 			}
 			auto& action_ptr = cortex->getActionsPtr();
-			action_ptr.fill(0, action_ptr.size(), 0ULL);
+			action_ptr.fill(0, action_ptr.size(), 0);
 			if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) action_ptr[0] |= (1ULL << 0);
 			if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) action_ptr[0] |= (1ULL << 1);
 			MSG msg;

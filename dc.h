@@ -23,10 +23,7 @@
 		kernel<<<blocks, threads, shared_mem_size, stream>>>(__VA_ARGS__)
 #endif
 
-inline void checkCudaError(cudaError_t err)
-{
-	if (err != cudaSuccess && err != cudaErrorCudartUnloading && err != cudaErrorContextIsDestroyed) throw std::runtime_error("CUDA Error: " + std::string(cudaGetErrorString(err)));
-}
+inline void checkCudaError(cudaError_t err) { if (err != cudaSuccess && err != cudaErrorCudartUnloading && err != cudaErrorContextIsDestroyed) throw std::runtime_error("CUDA Error: " + std::string(cudaGetErrorString(err))); }
 
 template <int dummy = 0>
 struct CudaStreamDeleter
@@ -44,13 +41,16 @@ using unique_stream = std::unique_ptr<std::remove_pointer_t<cudaStream_t>, CudaS
 
 inline size_t align16(size_t bytes) { return (bytes + 15) & ~15; };
 
+using type_gradients = float;
+
+template<typename T = __half>
 struct SquareOp
 {
-    __device__ __forceinline__ float operator()(const __half x) const
+	__device__ __forceinline__ float operator()(const T x) const
 	{
-        const float val = __half2float(x);
-        return val * val;
-    }
+		const float val = static_cast<float>(x);
+		return val * val;
+	}
 };
 
 inline void printGpuMem(const std::string& step_name)

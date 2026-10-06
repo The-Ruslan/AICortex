@@ -16,8 +16,7 @@ private:
 	universal_vector<float> score_output, trace_w1, trace_lambda;
 	cudaStream_t stream_forward, stream_backward;
 	int *total_size_grad_weights, *total_size_grad_biases;
-	const __half* learning_rate;
-	const __half2 h2_penalty;
+	const float learning_rate, f_penalty;
 public:
 	float get_score_output() const { return score_output[0]; }
 	void saveToFile(std::string pathFile) const
@@ -55,7 +54,7 @@ public:
 		weights_lambda.copy(weights_lambda_tmp, 0, real_size_weight, 0, real_size_weight, 0);
 		checkCudaError(cudaStreamSynchronize(0));
 	}
-	Critic(int inChannels, int outChannels, int in_dimension, cudaStream_t stream_fwd, int* total_size_g_weights, int* total_size_g_biases, cudaStream_t stream_bwd, __half* learningRate, float penalty, size_t* total_mem_main_device) :
+	Critic(int inChannels, int outChannels, int in_dimension, cudaStream_t stream_fwd, int* total_size_g_weights, int* total_size_g_biases, cudaStream_t stream_bwd, float learningRate, float penalty, size_t* total_mem_main_device) :
 		in_channels(inChannels), out_channels(outChannels << 1), dimension_in(in_dimension),
 		real_size_weight(in_channels * out_channels),
 		stream_forward(stream_fwd),
@@ -63,7 +62,7 @@ public:
 		total_size_grad_weights(total_size_g_weights),
 		total_size_grad_biases(total_size_g_biases),
 		learning_rate(learningRate),
-		h2_penalty(__float2half2_rn(penalty))
+		f_penalty(penalty)
 	{
 		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
 		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
@@ -87,7 +86,7 @@ public:
 		w_bytes = align16(out_channels * sizeof(__half));
 		weights2.resize(reinterpret_cast<__half*>(current_dev_main_ptr), out_channels, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
-		hidden_state.resize(reinterpret_cast<__half*>(current_dev_main_ptr), out_channels, h_zero(), MemoryType::Device);
+		hidden_state.resize(reinterpret_cast<__half*>(current_dev_main_ptr), out_channels, 0, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
 		w_bytes = align16(in_channels * sizeof(__half));
 		hidden_pool.resize(reinterpret_cast<__half*>(current_dev_main_ptr), in_channels, MemoryType::Device);
@@ -115,21 +114,21 @@ public:
 		const int complex_out_channels = out_channels >> 1;
 		LAUNCH_KERNEL(criticApplyTracesKernel<>, std::max(1, ((real_size_weight >> 1) + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights2.data(), trace_w1.data(), trace_lambda.data(), grad_weights.data(), grad_lambda.data(), score_output[0], real_score, complex_out_channels, in_channels);
 		LAUNCH_KERNEL(criticOutputGradKernel<>, std::max(1, (complex_out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, hidden_state.data(), grad_biases.data(), score_output[0], real_score, complex_out_channels);
-		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp{}, real_size_weight, stream_backward);
-		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp{}, out_channels, stream_backward);
-		const float sum_sq_l = grad_lambda.transform_reduce<float>(SquareOp{}, real_size_weight, stream_backward);
-		auto clip_op = [] (float sum_sq) -> __half
+		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_weights.data())>>{}, real_size_weight, stream_backward);
+		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_biases.data())>>{}, out_channels, stream_backward);
+		const float sum_sq_l = grad_lambda.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_lambda.data())>>{}, real_size_weight, stream_backward);
+		auto clip_op = [] (float sum_sq) -> float
 		{
 			const float norm = sqrtf(sum_sq + epsilon);
-			return __float2half(norm > 1.0f ? 1.0f / norm : 1.0f);
+			return norm > 1.0f ? 1.0f / norm : 1.0f;
 		};
-		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights1.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), *learning_rate, h2_penalty);
-		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights2.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), *learning_rate, h2_penalty);
-		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights_lambda.data(), grad_lambda.data(), real_size_weight, clip_op(sum_sq_l), *learning_rate, h2_penalty);
+		LAUNCH_KERNEL(updateParamsKernel<std::remove_pointer_t<decltype(weights1.data())>>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights1.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), learning_rate, f_penalty);
+		LAUNCH_KERNEL(updateParamsKernel<std::remove_pointer_t<decltype(weights2.data())>>, std::max(1, (out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights2.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), learning_rate, f_penalty);
+		LAUNCH_KERNEL(updateParamsKernel<std::remove_pointer_t<decltype(weights_lambda.data())>>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights_lambda.data(), grad_lambda.data(), real_size_weight, clip_op(sum_sq_l), learning_rate, f_penalty);
 	}
 	void reset(cudaStream_t stream_lnk = 0) 
     { 
-        hidden_state.fill(0, hidden_state.size(), h_zero(), stream_lnk); 
+        hidden_state.fill(0, hidden_state.size(), 0, stream_lnk); 
         trace_w1.fill(0, trace_w1.size(), 0.0f, stream_lnk);
         trace_lambda.fill(0, trace_lambda.size(), 0.0f, stream_lnk);
     }
