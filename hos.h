@@ -22,17 +22,17 @@ private:
 	float avg_ent = 1.0f, avg_huber = 0.01f, avg_shame_rolling = 1.0f;
 	static constexpr float momentum = 0.99f;
 	bool history_ready = false;
-	float get_group_total_shame(size_t start_idx)
+	float get_group_total_shame(size_t start_idx) const
 	{
 		float total = 0.0f;
 		for (size_t k = 0; k < meta_seq_len; ++k) total += entries[start_idx + k].shame_score;
 		return total;
 	}
 public:
-	float getHuberDelta() const { return sqrtf(avg_huber + epsilon); }
-	HallOfShame(size_t exp_mem_size_total, size_t exp_buffer_size_active) :
+	float getHuberDelta() const { return std::sqrtf(avg_huber + epsilon); }
+	HallOfShame(size_t exp_mem_size_total) :
 		exp_buffer_size_total(exp_mem_size_total),
-		exp_main_range(exp_buffer_size_total - exp_buffer_size_active),
+		exp_main_range(exp_buffer_size_total - meta_seq_len),
 		entries(exp_buffer_size_total),
 		history_buffer(meta_seq_len) {}
 	void initData(uint8_t*& current_host_main_ptr, int blocks_data_size)
@@ -68,26 +68,24 @@ public:
 	{
 		const float shame_score = history_buffer[history_index].shame_score;
 		avg_shame_rolling = fmaf(momentum, avg_shame_rolling, (1.0f - momentum) * shame_score);
-		history_buffer[history_index].past_pass_count = 1;
 		history_index = (history_index + 1) & (meta_seq_len - 1);
 		if (history_index == 0) history_ready = true;
 		if (!history_ready) return;
 		float current_history_total_shame = 0.0f;
 		for (size_t i = 0; i < meta_seq_len; ++i) current_history_total_shame += history_buffer[i].shame_score;
-		if (current_history_total_shame <= get_group_total_shame(min_group_start) || shame_score <= avg_shame_rolling * 1.1f) return;
+		if (current_history_total_shame <= get_group_total_shame(min_group_start) + epsilon || shame_score <= avg_shame_rolling + epsilon) return;
 		for (size_t i = 0; i < exp_main_range; i++) entries[i].past_pass_count++;
-		size_t read_ptr = history_index;
 		for (size_t i = 0; i < meta_seq_len; ++i)
 		{
-			entries[min_group_start + i](history_buffer[read_ptr], stream);
-			read_ptr = (read_ptr + 1) & (meta_seq_len - 1);
+			entries[min_group_start + i](history_buffer[i], stream);
+			entries[min_group_start + i].past_pass_count = 1;
 		}
 		float min_group_shame = get_group_total_shame(0);
 		size_t worst_group_start = 0;
 		for (size_t i = 0; i < exp_main_range; i += meta_seq_len)
 		{
 			float current_group_shame = get_group_total_shame(i);
-			if (current_group_shame < min_group_shame)
+			if (current_group_shame < min_group_shame + epsilon)
 			{
 				min_group_shame = current_group_shame;
 				worst_group_start = i;
@@ -98,21 +96,18 @@ public:
 	void getEntries(std::vector<S_Experience*>& result)
 	{
 		result.reserve(entries.size());
-		std::vector<S_Experience*> preresult(meta_seq_len);
-		for (size_t i = 0; i < entries.size(); i += meta_seq_len)
+		for (size_t i = 0; i < exp_main_range; i += meta_seq_len)
 		{
-			auto& entry = entries[i];
 			bool full_entried = true;
 			for (size_t j = 0; j < meta_seq_len; j++)
 			{
-				if (entry.shame_score > fminimum) preresult[j] = &entry;
-				else
+				if (entries[i + j].shame_score <= fminimum + epsilon)
 				{
 					full_entried = false;
 					break;
 				}
 			}
-			if (full_entried) for (size_t j = 0; j < meta_seq_len; j++) result.push_back(preresult[j]);
+			if (full_entried) for (size_t j = 0; j < meta_seq_len; j++) result.push_back(&entries[i + j]);
 		}
 	}
 };

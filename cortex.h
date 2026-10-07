@@ -628,8 +628,7 @@ public:
 		   bool& expAdd, bool& isRunning, std::atomic<bool>& isInputing, std::vector<uint8_t>& key_binds,
 		   size_t computationSpeed = 30,
 		   float learningRate = 0.0001f,
-		   size_t exp_buffer_size_total = meta_seq_len * meta_seq_len,
-		   size_t exp_buffer_size_active = meta_seq_len * 2) :
+		   size_t exp_buffer_size_total = meta_seq_len * meta_seq_len) :
 		work_mode(working_mode), isEliminating(is_eliminating), isScored(is_scored),
 		mtx_exp(mtxExp), mtx_running(mtxRunning),
 		cv_exp(cvExp), cv_running(cvRunning),
@@ -670,7 +669,7 @@ public:
 		mamba = std::make_unique<MambaBlock>(output_channels_mamba, dimension, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), &fps, learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
 		if (!is_in_inference && !is_in_inference_on_critic_only)
 		{
-			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total, exp_buffer_size_active);
+			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total);
 			convergence_controller = std::make_unique<ConvergenceController>();
 		}
 		if (!is_in_inference_on_inference) critic = std::make_unique<Critic>(input_channels_first, ((input_channels_first << 2) + 31) & ~31, img_resolution, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_side);
