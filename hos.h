@@ -16,7 +16,6 @@ struct EntropyOP
 class HallOfShame
 {
 private:
-    const size_t exp_buffer_size_total, exp_main_range;
 	std::vector<S_Experience> entries, history_buffer;
 	size_t min_group_start = 0, history_index = 0;
 	float avg_ent = 1.0f, avg_huber = 0.01f, avg_shame_rolling = 1.0f;
@@ -31,27 +30,20 @@ private:
 public:
 	float getHuberDelta() const { return std::sqrtf(avg_huber + epsilon); }
 	HallOfShame(size_t exp_mem_size_total) :
-		exp_buffer_size_total(exp_mem_size_total),
-		exp_main_range(exp_buffer_size_total - meta_seq_len),
-		entries(exp_buffer_size_total),
+		entries(((exp_mem_size_total + meta_seq_len - 1) & ~(meta_seq_len - 1)) - meta_seq_len),
 		history_buffer(meta_seq_len) {}
-	void initData(uint8_t*& current_host_main_ptr, int blocks_data_size)
+	void initData(uint8_t*& current_host_main_ptr, int blocks_data_size, int blocks_size)
 	{
-		for (auto& entry : entries)
+		for (int i = 0; i < entries.size() + history_buffer.size(); i++)
 		{
+			auto& entry = i < entries.size() ? entries[i] : history_buffer[i - entries.size()];
 			size_t w_bytes = align16(blocks_data_size * sizeof(uint32_t) << 2);
 			entry.blocks_data.resize(reinterpret_cast<uint32_t*>(current_host_main_ptr), blocks_data_size << 2, MemoryType::PinnedHost);
 			current_host_main_ptr += w_bytes;
 			w_bytes = align16(blocks_data_size * sizeof(int8_t));
 			entry.blocks_data_scales.resize(reinterpret_cast<int8_t*>(current_host_main_ptr), blocks_data_size, MemoryType::PinnedHost);
 			current_host_main_ptr += w_bytes;
-		}
-		for (size_t i = 0; i < history_buffer.size(); i++)
-		{
-			auto& entry = entries[exp_main_range + i];
-			auto& entry_hb = history_buffer[i];
-			entry_hb.blocks_data.resize(entry.blocks_data.data(), entry.blocks_data.size(), MemoryType::PinnedHost);
-			entry_hb.blocks_data_scales.resize(entry.blocks_data_scales.data(), entry.blocks_data_scales.size(), MemoryType::PinnedHost);
+			entry.stochasticDepth.resize(blocks_size, 0);
 		}
 	}
 	void addEntry(const S_Experience& exp, universal_vector<__half>& probs_fwd, float predicted_score, float real_score, cudaStream_t stream = 0)
@@ -74,15 +66,15 @@ public:
 		float current_history_total_shame = 0.0f;
 		for (size_t i = 0; i < meta_seq_len; ++i) current_history_total_shame += history_buffer[i].shame_score;
 		if (current_history_total_shame <= get_group_total_shame(min_group_start) + epsilon || shame_score <= avg_shame_rolling + epsilon) return;
-		for (size_t i = 0; i < exp_main_range; i++) entries[i].past_pass_count++;
+		for (size_t i = 0; i < entries.size(); i++) entries[i].past_pass_count++;
 		for (size_t i = 0; i < meta_seq_len; ++i)
 		{
-			entries[min_group_start + i](history_buffer[i], stream);
+			entries[min_group_start + i](history_buffer[(history_index + i) & (meta_seq_len - 1)], stream);
 			entries[min_group_start + i].past_pass_count = 1;
 		}
 		float min_group_shame = get_group_total_shame(0);
 		size_t worst_group_start = 0;
-		for (size_t i = 0; i < exp_main_range; i += meta_seq_len)
+		for (size_t i = 0; i < entries.size(); i += meta_seq_len)
 		{
 			float current_group_shame = get_group_total_shame(i);
 			if (current_group_shame < min_group_shame + epsilon)
@@ -96,7 +88,7 @@ public:
 	void getEntries(std::vector<S_Experience*>& result)
 	{
 		result.reserve(entries.size());
-		for (size_t i = 0; i < exp_main_range; i += meta_seq_len)
+		for (size_t i = 0; i < entries.size(); i += meta_seq_len)
 		{
 			bool full_entried = true;
 			for (size_t j = 0; j < meta_seq_len; j++)

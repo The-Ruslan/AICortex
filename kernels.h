@@ -930,7 +930,7 @@ __global__ void __launch_bounds__(threads_per_block, 4) residualAddBwdKernel(con
 	}
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, float* __restrict__ h_states, float* __restrict__ trace_A_re, float* __restrict__ trace_A_im, float* __restrict__ trace_B, float* __restrict__ trace_Delta, __half* __restrict__ output, const int32_t* __restrict__ hilbert_lut, int spatial_dimension, int OutC)
+__global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, float* __restrict__ h_states, float* __restrict__ trace_A_re, float* __restrict__ trace_A_im, float* __restrict__ trace_B, float* __restrict__ trace_Delta, __half* __restrict__ output, int OutC)
 {
 	constexpr int num_warps = threads_per_block >> 5,
 				  off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
@@ -940,7 +940,6 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 				  off_D = off_A_im + mamba_d_inner * mamba_d_state,
 				  off_W_out = off_D + mamba_d_inner,
 				  u32_stride_in = final_channels >> 3,
-				  groups_per_in = final_channels >> 5,
 				  mamba_cols = mamba_d_state >> 5;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
@@ -982,84 +981,80 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 		cached_W_C_re[c] = dequantize_scalar(weights[(off_W_C_re + w_off) >> 3], (off_W_C_re + w_off) & 7, weight_scales[(off_W_C_re + w_off) >> 5]);
 		cached_W_C_im[c] = dequantize_scalar(weights[(off_W_C_im + w_off) >> 3], (off_W_C_im + w_off) & 7, weight_scales[(off_W_C_im + w_off) >> 5]);
 	}
-	for (int t = 0; t < spatial_dimension; t++)
+	const float x_local = dequantize_scalar(load_u32(input, 0, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[in_ch_idx >> 5]);
+	float B_x_mimo = 0.0f, y_acc = 0.0f;
+	#pragma unroll
+	for (int window = 0; window < 32; window += 4) 
 	{
-		const int current_t_idx = hilbert_lut[t];
-		const float x_local = dequantize_scalar(load_u32(input, current_t_idx, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[current_t_idx * groups_per_in + (in_ch_idx >> 5)]);
-		float B_x_mimo = 0.0f, y_acc = 0.0f;
+		float x_chunk[4];
 		#pragma unroll
-		for (int window = 0; window < 32; window += 4) 
-		{
-			float x_chunk[4];
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) x_chunk[i] = __shfl_sync(0xFFFFFFFF, x_local, window + i);
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) B_x_mimo = fmaf(dequantize_scalar(B_row_packed[(window + i) >> 3], (window + i) & 7, B_single_scale), x_chunk[i], B_x_mimo);
-		}
-		const float xlwdl = x_local * W_delta_l, dt = xlwdl + __logf(1.0f + __expf(-fabsf(xlwdl))), dt_half_neg = -dt * 0.5f;
+		for (int i = 0; i < 4; ++i) x_chunk[i] = __shfl_sync(0xFFFFFFFF, x_local, window + i);
 		#pragma unroll
-		for (int c = 0; c < mamba_cols; ++c)
-		{
-			const float are = -__expf(cached_raw_A_re[c]);
-			const float dim = dt_half_neg * cached_raw_A_im[c];
-			const float dre = fmaf(dt_half_neg, are, 1.0f);
-			const float inv_s = __frcp_rn(fmaf(dre, dre, fmaf(dim, dim, epsilon)));
-			const float ire = dre * inv_s;
-			const float iim = -dim * inv_s;
-			const float nim = -1.0f * dim;
-			const float nre = fmaf(dt * 0.5f, are, 1.0f);
-			const float abr = fmaf(nre, ire, -nim * iim);
-			const float abi = fmaf(nre, iim, nim * ire);
-			const float dt_B_x = dt * B_x_mimo;
-			const float hr_old = hr_l[c];
-			hr_l[c] = fmaf(abr, hr_old, fmaf(-abi, hi_l[c], dt_B_x * ire));
-			hi_l[c] = fmaf(abr, hi_l[c], fmaf(abi, hr_old, dt_B_x * iim));
-			trA_re[c] = fmaf(abr, trA_re[c], hr_old);
-			trA_im[c] = fmaf(abr, trA_im[c], hi_l[c]);
-			trB[c] = fmaf(abr, trB[c], dt * x_local);
-			trDelta[c] = fmaf(abr, trDelta[c], B_x_mimo * ire + hr_old * are * -0.5f);
-			y_acc = fmaf(hr_l[c], cached_W_C_re[c], fmaf(-hi_l[c], cached_W_C_im[c], y_acc));
-		}
-		s_mem[ch] = __float2half(fmaf(D_skip_l, x_local, y_acc));
-		__syncthreads();
-		for (int b_oc = block_oc_start; b_oc < block_oc_end; b_oc += num_warps)
-		{
-			const int oc = b_oc + warp_id;
-			float sum_out = 0.0f;
-			if (oc < block_oc_end)
-			{
-				const int w_base = off_W_out + oc * mamba_d_inner;
-				float local_s_arr[4] = {};
-				uint32_t w_raw[4];
-				int8_t ws_raw[4];
-				for (int ic = lane_id; ic < mamba_d_inner; ic += 128)
-				{
-					#pragma unroll
-					for (int i = 0; i < 4; i++)
-					{
-						const int idx = w_base + ic + (i << 5);
-						w_raw[i] = weights[idx >> 3];
-						ws_raw[i] = weight_scales[idx >> 5];
-					}
-					#pragma unroll
-					for (int i = 0; i < 4; i++)
-					{
-						const int idx_ic = ic + (i << 5);
-						local_s_arr[i] = fmaf(__half2float(s_mem[idx_ic]), dequantize_scalar(w_raw[i], (w_base + idx_ic) & 7, ws_raw[i]), local_s_arr[i]);
-					}
-				}
-				sum_out = local_s_arr[0] + local_s_arr[1] + local_s_arr[2] + local_s_arr[3];
-			}
-			#pragma unroll
-			for (int offset = 16; offset > 0; offset >>= 1) sum_out += __shfl_down_sync(0xFFFFFFFF, sum_out, offset);
-			if (lane_id == 0 && oc < block_oc_end)
-			{
-				const float b = __half2float(biases[oc]);
-				output[t * OutC + oc] = __float2half((sum_out + b) * __frcp_rn(1.0f + __expf(-(sum_out + b))));
-			}
-		}
-		__syncthreads();
+		for (int i = 0; i < 4; ++i) B_x_mimo = fmaf(dequantize_scalar(B_row_packed[(window + i) >> 3], (window + i) & 7, B_single_scale), x_chunk[i], B_x_mimo);
 	}
+	const float xlwdl = x_local * W_delta_l, dt = xlwdl + __logf(1.0f + __expf(-fabsf(xlwdl))), dt_half_neg = -dt * 0.5f;
+	#pragma unroll
+	for (int c = 0; c < mamba_cols; ++c)
+	{
+		const float are = -__expf(cached_raw_A_re[c]);
+		const float dim = dt_half_neg * cached_raw_A_im[c];
+		const float dre = fmaf(dt_half_neg, are, 1.0f);
+		const float inv_s = __frcp_rn(fmaf(dre, dre, fmaf(dim, dim, epsilon)));
+		const float ire = dre * inv_s;
+		const float iim = -dim * inv_s;
+		const float nim = -1.0f * dim;
+		const float nre = fmaf(dt * 0.5f, are, 1.0f);
+		const float abr = fmaf(nre, ire, -nim * iim);
+		const float abi = fmaf(nre, iim, nim * ire);
+		const float dt_B_x = dt * B_x_mimo;
+		const float hr_old = hr_l[c];
+		hr_l[c] = fmaf(abr, hr_old, fmaf(-abi, hi_l[c], dt_B_x * ire));
+		hi_l[c] = fmaf(abr, hi_l[c], fmaf(abi, hr_old, dt_B_x * iim));
+		trA_re[c] = fmaf(abr, trA_re[c], hr_old);
+		trA_im[c] = fmaf(abr, trA_im[c], hi_l[c]);
+		trB[c] = fmaf(abr, trB[c], dt * x_local);
+		trDelta[c] = fmaf(abr, trDelta[c], B_x_mimo * ire + hr_old * are * -0.5f);
+		y_acc = fmaf(hr_l[c], cached_W_C_re[c], fmaf(-hi_l[c], cached_W_C_im[c], y_acc));
+	}
+	s_mem[ch] = __float2half(fmaf(D_skip_l, x_local, y_acc));
+	__syncthreads();
+	for (int b_oc = block_oc_start; b_oc < block_oc_end; b_oc += num_warps)
+	{
+		const int oc = b_oc + warp_id;
+		float sum_out = 0.0f;
+		if (oc < block_oc_end)
+		{
+			const int w_base = off_W_out + oc * mamba_d_inner;
+			float local_s_arr[4] = {};
+			uint32_t w_raw[4];
+			int8_t ws_raw[4];
+			for (int ic = lane_id; ic < mamba_d_inner; ic += 128)
+			{
+				#pragma unroll
+				for (int i = 0; i < 4; i++)
+				{
+					const int idx = w_base + ic + (i << 5);
+					w_raw[i] = weights[idx >> 3];
+					ws_raw[i] = weight_scales[idx >> 5];
+				}
+				#pragma unroll
+				for (int i = 0; i < 4; i++)
+				{
+					const int idx_ic = ic + (i << 5);
+					local_s_arr[i] = fmaf(__half2float(s_mem[idx_ic]), dequantize_scalar(w_raw[i], (w_base + idx_ic) & 7, ws_raw[i]), local_s_arr[i]);
+				}
+			}
+			sum_out = local_s_arr[0] + local_s_arr[1] + local_s_arr[2] + local_s_arr[3];
+		}
+		#pragma unroll
+		for (int offset = 16; offset > 0; offset >>= 1) sum_out += __shfl_down_sync(0xFFFFFFFF, sum_out, offset);
+		if (lane_id == 0 && oc < block_oc_end)
+		{
+			const float b = __half2float(biases[oc]);
+			output[oc] = __float2half((sum_out + b) * __frcp_rn(1.0f + __expf(-(sum_out + b))));
+		}
+	}
+	__syncthreads();
 	if (blockIdx.x != 0) return;
 	const int base_h = ch * (mamba_d_state << 1), base_tr = ch * mamba_d_state;
 	#pragma unroll
@@ -1075,7 +1070,7 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 	}
 }
 template <typename T = __half, typename U = __half, int threads_per_block = gpu_block_threads>
-__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const U* __restrict__ grad_output, const __half* __restrict__ output, const float* __restrict__ trace_A_re, const float* __restrict__ trace_A_im, const float* __restrict__ trace_B, const float* __restrict__ trace_Delta, const T* __restrict__ master_weights, T* __restrict__ grad_weights, __half* __restrict__ grad_biases, T* __restrict__ grad_input, const int32_t* __restrict__ hilbert_lut, int spatial_dimension, int OutC)
+__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const U* __restrict__ grad_output, const __half* __restrict__ output, const float* __restrict__ trace_A_re, const float* __restrict__ trace_A_im, const float* __restrict__ trace_B, const float* __restrict__ trace_Delta, const T* __restrict__ master_weights, T* __restrict__ grad_weights, __half* __restrict__ grad_biases, T* __restrict__ grad_input, int OutC)
 {
 	constexpr int off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
 				  off_W_C_im = off_W_C_re + mamba_d_inner * mamba_d_state,
@@ -1084,8 +1079,7 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 				  off_D = off_A_im + mamba_d_inner * mamba_d_state,
 				  off_W_out = off_D + mamba_d_inner,
 				  mamba_cols = mamba_d_state >> 5,
-				  u32_stride_in = final_channels >> 3,
-				  groups_per_in = final_channels >> 5;
+				  u32_stride_in = final_channels >> 3;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
 	const int num_warps = threads_per_block >> 5;
@@ -1101,32 +1095,28 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 		dBre_acc[i] = 0.0f;
 	}
 	const float D_skip = static_cast<float>(master_weights[off_D + ch_idx]), W_delta = static_cast<float>(master_weights[ch_idx]);
-	for (int t = 0; t < spatial_dimension; ++t)
+	float grad_y_ssm = 0.0f;
+	for (int oc = 0; oc < OutC; ++oc)
 	{
-		float grad_y_ssm = 0.0f;
-		for (int oc = 0; oc < OutC; ++oc)
-		{
-			const float o = __half2float(output[t * OutC + oc]);
-			const float g_act = static_cast<float>(grad_output[t * OutC + oc]) * o * (1.0f - o);
-			grad_y_ssm = fmaf(g_act, static_cast<float>(master_weights[off_W_out + oc * mamba_d_inner + ch_idx]), grad_y_ssm);
-			if (blockIdx.y == 0 && threadIdx.x == 0 && t == 0) atomicAdd(&grad_biases[oc], __float2half(g_act));
-		}
-		const int base_tr = ch_idx * mamba_d_state;
-		#pragma unroll
-		for (int i = 0; i < mamba_cols; ++i)
-		{
-			const int idx = base_tr + lane_id + (i << 5);
-			dAre_acc[i] = fmaf(grad_y_ssm, trace_A_re[idx], dAre_acc[i]);
-			dAim_acc[i] = fmaf(grad_y_ssm, trace_A_im[idx], dAim_acc[i]);
-			dBre_acc[i] = fmaf(grad_y_ssm, trace_B[idx], dBre_acc[i]);
-		}
-		const float current_trace_delta = trace_Delta[base_tr + lane_id];
-		const int h_idx_t = hilbert_lut[t];
-		const float x_t = dequantize_scalar(load_u32(input, h_idx_t, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[h_idx_t * groups_per_in + (in_ch_idx >> 5)]);
-		dW_delta_acc = fmaf(grad_y_ssm, current_trace_delta, dW_delta_acc);
-		dD_acc = fmaf(grad_y_ssm, x_t, dD_acc);
-		atomicAdd(grad_input + h_idx_t * final_channels + (ch_idx & (final_channels - 1)), static_cast<T>(fmaf(grad_y_ssm * current_trace_delta * __frcp_rn(1.0f + __expf(-x_t * W_delta)), W_delta, grad_y_ssm * D_skip)));
-    }
+		const float o = __half2float(output[oc]);
+		const float g_act = static_cast<float>(grad_output[oc]) * o * (1.0f - o);
+		grad_y_ssm = fmaf(g_act, static_cast<float>(master_weights[off_W_out + oc * mamba_d_inner + ch_idx]), grad_y_ssm);
+		if (blockIdx.y == 0 && threadIdx.x == 0) atomicAdd(&grad_biases[oc], __float2half(g_act));
+	}
+	const int base_tr = ch_idx * mamba_d_state;
+	#pragma unroll
+	for (int i = 0; i < mamba_cols; ++i)
+	{
+		const int idx = base_tr + lane_id + (i << 5);
+		dAre_acc[i] = fmaf(grad_y_ssm, trace_A_re[idx], dAre_acc[i]);
+		dAim_acc[i] = fmaf(grad_y_ssm, trace_A_im[idx], dAim_acc[i]);
+		dBre_acc[i] = fmaf(grad_y_ssm, trace_B[idx], dBre_acc[i]);
+	}
+	const float current_trace_delta = trace_Delta[base_tr + lane_id];
+	const float x_t = dequantize_scalar(load_u32(input, 0, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[in_ch_idx >> 5]);
+	dW_delta_acc = fmaf(grad_y_ssm, current_trace_delta, dW_delta_acc);
+	dD_acc = fmaf(grad_y_ssm, x_t, dD_acc);
+	atomicAdd(grad_input + (ch_idx & (final_channels - 1)), static_cast<T>(fmaf(grad_y_ssm * current_trace_delta * __frcp_rn(1.0f + __expf(-x_t * W_delta)), W_delta, grad_y_ssm * D_skip)));
 	atomicAdd(&grad_weights[ch_idx], static_cast<T>(dW_delta_acc));
 	atomicAdd(&grad_weights[off_D + ch_idx], static_cast<T>(dD_acc));
 	const int base_row_offset = ch_idx * mamba_d_state;

@@ -17,7 +17,7 @@ public:
 		stochasticDepth = other.stochasticDepth;
 		past_pass_count = other.past_pass_count;
 	}
-	S_Experience() { stochasticDepth.resize(depth, 0); }
+	S_Experience() {}
     ~S_Experience() {}
     S_Experience(const S_Experience& other) { this->copy_from(other); }
 	S_Experience& operator=(const S_Experience& other)

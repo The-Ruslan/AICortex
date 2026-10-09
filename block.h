@@ -5,7 +5,7 @@
 class Block
 {
 private:
-	const int input_channels, output_channels, final_dimension, input_dimension;
+	const int input_channels, output_channels, middle_channels, input_dimension, final_dimension;
 	int *pipo_db, *pipo_db_num_groups;
 	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
 	cudaStream_t stream_forward, stream_backward;
@@ -28,22 +28,22 @@ public:
 		conv_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "conv_layer2.bin").string());
 		conv_layers[3]->loadFromFile((std::filesystem::path(pathFile) / "residual_layer.bin").string());
 	}
-	Block(int in_channels, int out_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
+	Block(int in_channels, int mid_channels, int out_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
 		  int* total_size_grad_weights, int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups,
 		  int kernel_size_dw, float survival_probability, cudaStream_t stream_bwd, float learning_rate, float penalty,
 		  size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
 		input_channels(in_channels),
+		middle_channels(mid_channels),
 		output_channels(out_channels),
-		final_dimension(out_dimension),
 		input_dimension(in_dimension),
+		final_dimension(out_dimension),
 		stream_forward(stream_fwd),
 		stream_backward(stream_bwd),
 		pipo_db(db_pipo),
 		pipo_db_num_groups(db_pipo_num_groups),
 		survival_prob_inv(1.0f / survival_probability)
     {
-		const int middle_channels = output_channels << 2,
-				  local_pipo_db = middle_channels * final_dimension * final_dimension,
+		const int local_pipo_db = middle_channels * final_dimension * final_dimension,
 				  local_pipo_db_num_groups = local_pipo_db >> 5;
 		*pipo_db = *pipo_db < local_pipo_db ? local_pipo_db : *pipo_db;
 		*pipo_db_num_groups = *pipo_db_num_groups < local_pipo_db_num_groups ? local_pipo_db_num_groups : *pipo_db_num_groups;
@@ -74,7 +74,6 @@ public:
 		if (!is_skipped || !train_mode)
 		{
 			conv_layers[0]->forward(input, input_scales, buffer_a, buffer_a_scales);
-			const int middle_channels = output_channels << 2;
 			dim3 block(gpu_block_threads);
 			dim3 grid((middle_channels + block.x - 1) / block.x, final_dimension, final_dimension);
 			const size_t shared_mem_bytes = (middle_channels >> 3) * sizeof(uint32_t);

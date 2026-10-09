@@ -8,50 +8,19 @@ struct MambaWeightsOP
 	T* ptr;
 	__host__ __device__ void operator()(size_t i) const { ptr[i] = static_cast<T>(-12.1f - 0.4f * (i & (mamba_d_state - 1)) / (mamba_d_state - 1)); }
 };
-struct HilbertLutOP
-{
-	int* ptr;
-	const int in_dimension;
-	__device__ void operator()(int d) const
-	{
-		int x = 0, y = 0, rx, ry, t = d;
-		for (int s = 1; s < in_dimension; s <<= 1)
-		{
-			rx = 1 & (t >> 1);
-			ry = 1 & (t ^ rx);
-			if (ry == 0)
-			{
-				if (rx == 1)
-				{ 
-					x = s - 1 - x; 
-					y = s - 1 - y;
-				}
-				const int temp = x;
-				x = y;
-				y = temp;
-			}
-			x += s * rx;
-			y += s * ry;
-			t >>= 2;
-		}
-		ptr[d] = y * in_dimension + x;
-	}
-};
 
 class MambaBlock
 {
 private:
-	const int out_channels, in_dimension, real_size_weight, num_groups;
+	const int out_channels, real_size_weight, num_groups;
 	universal_vector<uint32_t> weights;
 	universal_vector<int8_t> weight_scales;
 	universal_vector<__half> biases, grad_biases, mamba_output;
 	universal_vector<type_gradients> master_weights, grad_weights;
 	universal_vector<float> h_states, h_states_temp_buf, trace_A_re, trace_A_im, trace_B, trace_Delta;
-	static constexpr size_t mamba_d_in_sta = mamba_d_inner * mamba_d_state;
 	cudaStream_t stream_forward, stream_backward;
 	int *total_size_grad_weights, *total_size_grad_biases, frame_counter = 0, *frame_counter_max = nullptr;
 	bool trigger_memory_update = false;
-	universal_vector<int32_t> hilbert_lut;
 	const float learning_rate, f_penalty;
 public:
 	void saveToFile(std::string pathFile) const
@@ -84,11 +53,10 @@ public:
 		LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
 		checkCudaError(cudaStreamSynchronize(0));
 	}
-	MambaBlock(int output_channels, int dim_in, cudaStream_t stream_fwd, int* total_size_g_weights, int* total_size_g_biases,
+	MambaBlock(int output_channels, cudaStream_t stream_fwd, int* total_size_g_weights, int* total_size_g_biases,
 			   cudaStream_t stream_bwd, int* frame_counter_max_ptr, float learningRate, float penalty,
 			   size_t* total_mem_device, size_t* total_mem_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
 		out_channels(output_channels),
-		in_dimension(dim_in),
 		real_size_weight(mamba_d_inner * (34 + (mamba_d_state << 2) + out_channels)),
 		num_groups(real_size_weight >> 5),
 		stream_forward(stream_fwd),
@@ -101,16 +69,15 @@ public:
 	{
 		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
 		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
-		*total_mem_device = *total_mem_device + align16(num_groups * sizeof(uint32_t) << 2) + align16(num_groups * sizeof(int8_t)) + align16(out_channels * sizeof(__half)) + align16(mamba_h_states_size * sizeof(float)) * 2 + align16(in_dimension * in_dimension * sizeof(int32_t)) + align16(mamba_d_in_sta * sizeof(float)) * 4;
+		*total_mem_device = *total_mem_device + align16(num_groups * sizeof(uint32_t) << 2) + align16(num_groups * sizeof(int8_t)) + align16(out_channels * sizeof(__half)) * 2 + align16(mamba_h_states_size * sizeof(float)) * 2 + align16(mamba_d_in_sta * sizeof(float)) * 4;
 		*total_mem_host = *total_mem_host + align16(real_size_weight * sizeof(std::remove_pointer_t<decltype(master_weights.data())>));
 		*total_learnable_data = *total_learnable_data + real_size_weight + out_channels;
 		*total_learnable_data_count = *total_learnable_data_count + 2;
 	}
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& current_dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, void**& meta_adapted_data, size_t*& meta_adapted_offsets)
 	{
-		const int spatial_dimension = in_dimension * in_dimension;
-		size_t w_bytes = align16(spatial_dimension * out_channels * sizeof(__half));
-		mamba_output.resize(reinterpret_cast<__half*>(current_dev_main_ptr), spatial_dimension * out_channels, MemoryType::Device);
+		size_t w_bytes = align16(out_channels * sizeof(std::remove_pointer_t<decltype(mamba_output.data())>));
+		mamba_output.resize(reinterpret_cast<std::remove_pointer_t<decltype(mamba_output.data())>*>(current_dev_main_ptr), out_channels, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
 		w_bytes = align16(num_groups * sizeof(uint32_t) << 2);
 		weights.resize(reinterpret_cast<uint32_t*>(current_dev_main_ptr), num_groups << 2, MemoryType::Device);
@@ -128,9 +95,6 @@ public:
 		h_states.resize(reinterpret_cast<float*>(current_dev_main_ptr), mamba_h_states_size, 0.0f, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
 		h_states_temp_buf.resize(reinterpret_cast<float*>(current_dev_main_ptr), mamba_h_states_size, 0.0f, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(spatial_dimension * sizeof(int32_t));
-		hilbert_lut.resize(reinterpret_cast<int32_t*>(current_dev_main_ptr), spatial_dimension, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
 		if (!is_in_inference)
 		{
@@ -176,7 +140,6 @@ public:
 			master_weights.fill(off_A_im, off_A_im + mamba_d_in_sta, 0.001f, 0);
 			LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
 		}
-		hilbert_lut.for_each_n(hilbert_lut.size(), HilbertLutOP{hilbert_lut.data(), in_dimension}, 0);
 	}
 	void forward(const universal_vector<uint32_t>& input, const universal_vector<int8_t>& input_scales)
 	{
@@ -194,7 +157,7 @@ public:
 		float* target_h_states_ptr = trigger_memory_update ? h_states.data() : h_states_temp_buf.data();
 		constexpr int num_warps = gpu_block_threads >> 5;
 		dim3 grid_dim(out_channels, (((mamba_d_inner + 31) >> 5) + num_warps - 1) / num_warps, 1);
-		LAUNCH_KERNEL(mambaSSMFwdKernel<>, grid_dim, gpu_block_threads, 0, stream_forward, input.data(), input_scales.data(), weights.data(), weight_scales.data(), biases.data(), target_h_states_ptr, trace_A_re.data(), trace_A_im.data(), trace_B.data(), trace_Delta.data(), mamba_output.data(), hilbert_lut.data(), in_dimension * in_dimension, out_channels);
+		LAUNCH_KERNEL(mambaSSMFwdKernel<>, grid_dim, gpu_block_threads, 0, stream_forward, input.data(), input_scales.data(), weights.data(), weight_scales.data(), biases.data(), target_h_states_ptr, trace_A_re.data(), trace_A_im.data(), trace_B.data(), trace_Delta.data(), mamba_output.data(), out_channels);
 	}
 	template<typename T = __half>
 	void backward(universal_vector<T>& grad_output, const universal_vector<uint32_t>& input, const universal_vector<int8_t>& input_scales, universal_vector<type_gradients>& grad_input)
@@ -202,7 +165,7 @@ public:
 		grad_weights.fill(0, real_size_weight, 0, stream_backward);
 		grad_biases.fill(0, out_channels, 0, stream_backward);
 		dim3 grid_dim((mamba_d_inner + gpu_block_threads - 1) / gpu_block_threads, 1, 1);
-		LAUNCH_KERNEL((mambaSSMApplyTracesKernel<std::remove_pointer_t<decltype(grad_input.data())>, std::remove_pointer_t<decltype(grad_output.data())>>), grid_dim, gpu_block_threads, 0, stream_backward, input.data(), input_scales.data(), grad_output.data(), mamba_output.data(), trace_A_re.data(), trace_A_im.data(), trace_B.data(), trace_Delta.data(), master_weights.data(), grad_weights.data(), grad_biases.data(), grad_input.data(), hilbert_lut.data(), in_dimension * in_dimension, out_channels);
+		LAUNCH_KERNEL((mambaSSMApplyTracesKernel<std::remove_pointer_t<decltype(grad_input.data())>, std::remove_pointer_t<decltype(grad_output.data())>>), grid_dim, gpu_block_threads, 0, stream_backward, input.data(), input_scales.data(), grad_output.data(), mamba_output.data(), trace_A_re.data(), trace_A_im.data(), trace_B.data(), trace_Delta.data(), master_weights.data(), grad_weights.data(), grad_biases.data(), grad_input.data(), out_channels);
 		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_weights.data())>>{}, real_size_weight, stream_backward);
 		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_biases.data())>>{}, out_channels, stream_backward);
 		auto clip_op = [] (float sum_sq) -> float
