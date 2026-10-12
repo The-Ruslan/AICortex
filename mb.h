@@ -57,7 +57,7 @@ public:
 			   cudaStream_t stream_bwd, int* frame_counter_max_ptr, float learningRate, float penalty,
 			   size_t* total_mem_device, size_t* total_mem_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
 		out_channels(output_channels),
-		real_size_weight(mamba_d_inner * (34 + (mamba_d_state << 2) + out_channels)),
+		real_size_weight(mamba_d_inner * (2 + mamba_mimo_group_size + (mamba_d_state << 2) + out_channels)),
 		num_groups(real_size_weight >> 5),
 		stream_forward(stream_fwd),
 		stream_backward(stream_bwd),

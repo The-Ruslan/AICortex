@@ -71,24 +71,16 @@ public:
 	}
     void forward(const uint32_t* input, const int8_t* input_scales, uint32_t* output, int8_t* output_scales, bool train_mode = true, bool is_skipped = false)
     {
-		if (!is_skipped || !train_mode)
+		const bool execute_main_branch = !is_skipped || !train_mode;
+		if (execute_main_branch)
 		{
 			conv_layers[0]->forward(input, input_scales, buffer_a, buffer_a_scales);
-			dim3 block(gpu_block_threads);
-			dim3 grid((middle_channels + block.x - 1) / block.x, final_dimension, final_dimension);
-			const size_t shared_mem_bytes = (middle_channels >> 3) * sizeof(uint32_t);
-			LAUNCH_KERNEL(convFusedPointwiseFwdKernel<>, grid, block, shared_mem_bytes, stream_forward, buffer_a.data(), buffer_a_scales.data(), conv_layers[1]->get_weights_ptr(), conv_layers[1]->get_weight_scales_ptr(), conv_layers[1]->get_biases_ptr(), conv_layers[2]->get_weights_ptr(), conv_layers[2]->get_weight_scales_ptr(), conv_layers[2]->get_biases_ptr(), buffer_a.data(), buffer_a_scales.data(), input_channels, middle_channels, output_channels, input_dimension, final_dimension, 1);
-			//conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b, buffer_b_scales);
-			//conv_layers[2]->forward(buffer_b.data(), buffer_b_scales.data(), buffer_a, buffer_a_scales);
-		}
-		else
-		{
-			buffer_a.fill(0, buffer_a.size(), 0, stream_forward);
-			buffer_a_scales.fill(0, buffer_a_scales.size(), 0, stream_forward);
+			conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b, buffer_b_scales);
+			conv_layers[2]->forward(buffer_b.data(), buffer_b_scales.data(), buffer_a, buffer_a_scales);
 		}
 		conv_layers[3]->forward(input, input_scales, buffer_b, buffer_b_scales);
 		dim3 blocks_grid(final_dimension, final_dimension);
-		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && !is_skipped ? survival_prob_inv : 1.0f);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && !is_skipped ? survival_prob_inv : 1.0f, execute_main_branch);
 	}
 	void backward(universal_vector<type_gradients>& grad_input_output, const uint32_t* input, const int8_t* input_scales, bool is_skipped = false)
 	{

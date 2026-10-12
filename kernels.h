@@ -170,45 +170,6 @@ __device__ __forceinline__ float tensor_cores_m16n8k32(const uint32_t* __restric
 	const float s_in = dequantize_scale(is);
 	return (lane_id & 1) == 0 ? static_cast<float>(d_frag.x) * s_in * dequantize_scale(ws0) : static_cast<float>(d_frag.y) * s_in * dequantize_scale(ws1);
 }
-__device__ __forceinline__ float tensor_cores_m16n8k32_smem(const uint32_t* __restrict__ smem_input, const int8_t& input_scale, const uint32_t* __restrict__ weights, const int8_t*  __restrict__ weight_scales, int MidC, int outc_blk_start, int lane_id)
-{
-	const int weight_outc_0 = outc_blk_start + ((lane_id & 3) << 1), groups_per_mid = MidC >> 5;
-	const int8_t ws0 = weight_scales[weight_outc_0 * groups_per_mid];
-	const int8_t ws1 = weight_scales[(weight_outc_0 + 1) * groups_per_mid];
-	int4 c_frag = make_int4(0, 0, 0, 0), d_frag = make_int4(0, 0, 0, 0);
-	uint2 a_reg, b_reg, next_a, next_b;
-	{
-		const int weight_row_u32 = lane_id >> 3;
-		b_reg.x = weights[weight_outc_0 * (groups_per_mid << 2) + weight_row_u32];
-		b_reg.y = weights[(weight_outc_0 + 1) * (groups_per_mid << 2) + weight_row_u32];
-		a_reg.x = smem_input[lane_id & 3];
-		a_reg.y = smem_input[(lane_id + 1) & 3];
-	}
-	for (int k_idx = 32; k_idx < MidC; k_idx += 32)
-	{
-		const int next_g = k_idx >> 5, next_weight_row_u32 = (next_g << 2) + (lane_id >> 3);
-		next_b.x = weights[weight_outc_0 * (groups_per_mid << 2) + next_weight_row_u32];
-		next_b.y = weights[(weight_outc_0 + 1) * (groups_per_mid << 2) + next_weight_row_u32];
-		next_a.x = smem_input[(next_g << 2) + (lane_id & 3)];
-		next_a.y = smem_input[(next_g << 2) + ((lane_id + 1) & 3)];
-		mma_m16n8k32_s4(d_frag, a_reg, b_reg.x, c_frag);
-		const int accumulated_outc_0 = d_frag.x;
-		d_frag = c_frag;
-		mma_m16n8k32_s4(d_frag, a_reg, b_reg.y, c_frag);
-		d_frag.x = accumulated_outc_0;
-		c_frag = d_frag;
-		a_reg = next_a;
-		b_reg = next_b;
-	}
-	mma_m16n8k32_s4(d_frag, a_reg, b_reg.x, c_frag);
-	const int accumulated_outc_0 = d_frag.x;
-	d_frag = c_frag;
-	mma_m16n8k32_s4(d_frag, a_reg, b_reg.y, c_frag);
-	d_frag.x = accumulated_outc_0;
-	c_frag = d_frag;
-	const float s_in = dequantize_scale(input_scale);
-	return (lane_id & 1) == 0 ? static_cast<float>(d_frag.x) * s_in * dequantize_scale(ws0) : static_cast<float>(d_frag.y) * s_in * dequantize_scale(ws1);
-}
 template <typename T = __half>
 __global__ void __launch_bounds__(gpu_block_threads, 4) quantizeKernel(const T* __restrict__ input, uint32_t* __restrict__ output, int8_t* __restrict__ scales, int total_elements)
 {
@@ -327,155 +288,6 @@ __global__ void convPointwiseFwdKernel(const uint32_t* __restrict__ input, const
 	for (int i = 4; i > 0; i >>= 1) val |= __shfl_down_sync(0xFFFFFFFF, val, i);
 	if ((lane_id & 7) == 0) output[spatial_idx_out * (OutC >> 3) + (outc >> 3)] = val;
 	if (lane_id == 0) output_scales[spatial_idx_out * (OutC >> 5) + (outc >> 5)] = quantize_scale(out_scale);
-}
-template <int channels_per_block = gpu_block_threads>
-__global__ void convFusedPointwiseFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights1, const int8_t* __restrict__ weight_scales1, const __half* __restrict__ biases1, const uint32_t* __restrict__ weights2, const int8_t* __restrict__ weight_scales2, const __half* __restrict__ biases2, uint32_t* __restrict__ output, int8_t* __restrict__ output_scales, int InC, int MidC, int OutC, int Dimension_in, int Dimension_out, int stride)
-{
-	const int spatial_idx_out = blockIdx.z * gridDim.y + blockIdx.y;
-	const int lane_id = threadIdx.x & 31;
-	const int warp_id = threadIdx.x >> 5;
-	constexpr int warps = channels_per_block >> 5;
-	extern __shared__ uint32_t smem_middle[];
-	__shared__ float smem_warps[warps], smem_block_total;
-	__shared__ int8_t s_mid_scale;
-	const int outc_1 = blockIdx.x * channels_per_block + threadIdx.x;
-	float acc1 = 0.0f;
-	if (outc_1 < MidC)
-	{
-		const int groups_per_in1 = InC >> 5, u32_stride_in1 = InC >> 3;
-		const __half bias = biases1[outc_1];
-		#if __CUDA_ARCH__ >= 800
-		acc1 = tensor_cores_m16n8k32(input, input_scales, weights1, weight_scales1, InC, groups_per_in1, u32_stride_in1, (spatial_idx_out >> 4) << 4, (outc_1 >> 3) << 3, lane_id >> 1, lane_id);
-		#else
-		const int spatial_idx_in = (spatial_idx_out >> (__ffs(Dimension_out) - 1)) * stride * Dimension_in + (spatial_idx_out & (Dimension_out - 1)) * stride;
-		const int spatial_groups1 = spatial_idx_in * groups_per_in1, outc_groups1 = outc_1 * groups_per_in1;
-		const uint4* __restrict__ w_v4_1 = reinterpret_cast<const uint4*>(weights1) + outc_groups1;
-		const uint4* __restrict__ input_v4_base = reinterpret_cast<const uint4*>(input + spatial_idx_in * u32_stride_in1);
-		uint32_t dot_shared1[4];
-		uint4 curr_w1 = w_v4_1[0], curr_in_v4_1 = lane_id == 0 ? input_v4_base[0] : make_uint4(0, 0, 0, 0), next_w1, next_in_v4_1;
-		int8_t curr_in_scale1 = input_scales[spatial_groups1], curr_w_scale1 = weight_scales1[outc_groups1], next_in_scale1, next_w_scale1;
-		for (int g = 1; g < groups_per_in1; ++g)
-		{
-			next_w1 = w_v4_1[g];
-			next_in_v4_1 = lane_id == 0 ? input_v4_base[g] : make_uint4(0, 0, 0, 0);
-			next_in_scale1 = input_scales[spatial_groups1 + g];
-			next_w_scale1 = weight_scales1[outc_groups1 + g];
-			const auto& w_val_ptr1 = reinterpret_cast<const uint32_t(&)[4]>(curr_w1);
-			const auto& shared_in1 = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4_1);
-			int partial_sum1 = 0;
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) dot_shared1[i] = __shfl_sync(0xFFFFFFFF, shared_in1[i], 0);
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) partial_sum1 += dot_int4(dot_shared1[i], w_val_ptr1[i]);
-			acc1 = fmaf(dequantize_scale(curr_in_scale1), dequantize_scale(curr_w_scale1) * partial_sum1, acc1);
-			curr_w1 = next_w1;
-			curr_in_v4_1 = next_in_v4_1;
-			curr_in_scale1 = next_in_scale1;
-			curr_w_scale1 = next_w_scale1;
-		}
-		const auto& w_val_ptr1 = reinterpret_cast<const uint32_t(&)[4]>(curr_w1);
-		const auto& shared_in1 = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4_1);
-		int partial_sum1 = 0;
-		#pragma unroll
-		for (int i = 0; i < 4; ++i) dot_shared1[i] = __shfl_sync(0xFFFFFFFF, shared_in1[i], 0);
-		#pragma unroll
-		for (int i = 0; i < 4; ++i) partial_sum1 += dot_int4(dot_shared1[i], w_val_ptr1[i]);
-		acc1 = fmaf(dequantize_scale(curr_in_scale1), dequantize_scale(curr_w_scale1) * partial_sum1, acc1);
-		#endif
-		acc1 += __half2float(bias);
-	}
-	float local_sq1 = acc1 * acc1;
-	#pragma unroll
-	for (int offset = 16; offset > 0; offset >>= 1) local_sq1 += __shfl_xor_sync(0xFFFFFFFF, local_sq1, offset);
-	if (lane_id == 0) smem_warps[warp_id] = local_sq1;
-	__syncthreads();
-	if (warp_id == 0)
-	{
-		float block_sq1 = lane_id < warps ? smem_warps[lane_id] : 0.0f;
-		#pragma unroll
-		for (int offset = warps >> 1; offset > 0; offset >>= 1) block_sq1 += __shfl_xor_sync(0xFFFFFFFF, block_sq1, offset);
-		if (lane_id == 0) smem_block_total = block_sq1;
-	}
-	__syncthreads();
-	const float normed_acc1 = acc1 * __frsqrt_rn((smem_block_total / channels_per_block) + epsilon);
-	const float activated_acc1 = normed_acc1 * __frcp_rn(1.0f + __expf(-normed_acc1));
-	float group_max1 = fabsf(activated_acc1);
-	#pragma unroll
-	for (int offset = 16; offset > 0; offset >>= 1) group_max1 = fmaxf(group_max1, __shfl_xor_sync(0xFFFFFFFF, group_max1, offset));
-	const float out_scale1 = group_max1 < epsilon ? 1.0f : group_max1;
-	uint32_t val1 = quantize_scalar_to_int4(activated_acc1, quant_int4_max * __frcp_rn(out_scale1)) << ((lane_id & 7) << 2);
-	#pragma unroll
-	for (int i = 4; i > 0; i >>= 1) val1 |= __shfl_down_sync(0xFFFFFFFF, val1, i);
-	if ((lane_id & 7) == 0 && outc_1 < MidC) smem_middle[outc_1 >> 3] = val1;
-	if (threadIdx.x == 0) s_mid_scale = quantize_scale(out_scale1);
-	__syncthreads();
-	const int outc_2 = blockIdx.x * channels_per_block + threadIdx.x;
-	float acc2 = 0.0f;
-	if (outc_2 < OutC)
-	{
-		const __half bias = biases2[outc_2];
-		#if __CUDA_ARCH__ >= 800
-		acc2 = tensor_cores_m16n8k32_smem(smem_middle, s_mid_scale, weights2, weight_scales2, MidC, (outc_2 >> 3) << 3, lane_id);
-		#else
-		const int groups_per_in2 = MidC >> 5;
-		const int outc_groups2 = outc_2 * groups_per_in2;
-		const uint4* __restrict__ w_v4_2 = reinterpret_cast<const uint4*>(weights2) + outc_groups2;
-		const uint4* __restrict__ smem_v4_base = reinterpret_cast<const uint4*>(smem_middle);
-		uint32_t dot_shared2[4];
-		uint4 curr_w2 = w_v4_2[0], curr_in_v4_2 = lane_id == 0 ? smem_v4_base[0] : make_uint4(0, 0, 0, 0), next_w2, next_in_v4_2;
-		int8_t curr_w_scale2 = weight_scales2[outc_groups2], next_w_scale2;
-		for (int g = 1; g < groups_per_in2; ++g)
-		{
-			next_w2 = w_v4_2[g];
-			next_in_v4_2 = lane_id == 0 ? smem_v4_base[g] : make_uint4(0, 0, 0, 0);
-			next_w_scale2 = weight_scales2[outc_groups2 + g];
-			const auto& w_val_ptr2 = reinterpret_cast<const uint32_t(&)[4]>(curr_w2);
-			const auto& shared_in2 = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4_2);
-			int partial_sum2 = 0;
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) dot_shared2[i] = __shfl_sync(0xFFFFFFFF, shared_in2[i], 0);
-			#pragma unroll
-			for (int i = 0; i < 4; ++i) partial_sum2 += dot_int4(dot_shared2[i], w_val_ptr2[i]);
-			acc2 = fmaf(dequantize_scale(s_mid_scale), dequantize_scale(curr_w_scale2) * partial_sum2, acc2);
-			curr_w2 = next_w2;
-			curr_in_v4_2 = next_in_v4_2;
-			curr_w_scale2 = next_w_scale2;
-		}
-		const auto& w_val_ptr2 = reinterpret_cast<const uint32_t(&)[4]>(curr_w2);
-		const auto& shared_in2 = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4_2);
-		int partial_sum2 = 0;
-		#pragma unroll
-		for (int i = 0; i < 4; ++i) dot_shared2[i] = __shfl_sync(0xFFFFFFFF, shared_in2[i], 0);
-		#pragma unroll
-		for (int i = 0; i < 4; ++i) partial_sum2 += dot_int4(dot_shared2[i], w_val_ptr2[i]);
-		acc2 = fmaf(dequantize_scale(s_mid_scale), dequantize_scale(curr_w_scale2) * partial_sum2, acc2);
-		#endif
-		acc2 += __half2float(bias);
-	}
-	float local_sq2 = acc2 * acc2;
-	#pragma unroll
-	for (int offset = 16; offset > 0; offset >>= 1) local_sq2 += __shfl_xor_sync(0xFFFFFFFF, local_sq2, offset);
-	if (lane_id == 0) smem_warps[warp_id] = local_sq2;
-	__syncthreads();
-	if (warp_id == 0)
-	{
-		float block_sq2 = lane_id < warps ? smem_warps[lane_id] : 0.0f;
-		#pragma unroll
-		for (int offset = warps >> 1; offset > 0; offset >>= 1) block_sq2 += __shfl_xor_sync(0xFFFFFFFF, block_sq2, offset);
-		if (lane_id == 0) smem_block_total = block_sq2;
-	}
-	__syncthreads();
-	const float normed_acc2 = acc2 * __frsqrt_rn((smem_block_total / channels_per_block) + epsilon);
-	const float activated_acc2 = normed_acc2 * __frcp_rn(1.0f + __expf(-normed_acc2));
-	float group_max2 = fabsf(activated_acc2);
-	#pragma unroll
-	for (int offset = 16; offset > 0; offset >>= 1) group_max2 = fmaxf(group_max2, __shfl_xor_sync(0xFFFFFFFF, group_max2, offset));
-	const float out_scale2 = group_max2 < epsilon ? 1.0f : group_max2;
-	uint32_t val2 = quantize_scalar_to_int4(activated_acc2, quant_int4_max * __frcp_rn(out_scale2)) << ((lane_id & 7) << 2);
-	#pragma unroll
-	for (int i = 4; i > 0; i >>= 1) val2 |= __shfl_down_sync(0xFFFFFFFF, val2, i);
-	if ((lane_id & 7) == 0 && outc_2 < OutC) output[spatial_idx_out * (OutC >> 3) + (outc_2 >> 3)] = val2;
-	if (lane_id == 0 && outc_2 < OutC) output_scales[spatial_idx_out * (OutC >> 5) + (outc_2 >> 5)] = quantize_scale(out_scale2);
 }
 template <typename T = __half, int channels_per_block = gpu_block_threads>
 __global__ void convPointwiseBwdGradInputKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const __half* __restrict__ biases, const T* __restrict__ grad_output, const T* __restrict__ master_weights, T* __restrict__ grad_input, int InC, int OutC, int Dimension_in, int Dimension_out, int stride)
@@ -909,12 +721,12 @@ __global__ void convDepthwiseBwdGradBiasKernel(const T* __restrict__ grad_output
 	if ((lane_id & 1) == 0) *reinterpret_cast<__half2*>(grad_biases + outc) = __floats2half2_rn(sum, neighbor_sum);
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void __launch_bounds__(threads_per_block, 4) residualAddFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ residual, const int8_t* __restrict__ residual_scales, uint32_t* __restrict__ output, int8_t* __restrict__ output_scales, int channels, int dimension, float survival_prob_inv)
+__global__ void __launch_bounds__ (threads_per_block, 4) residualAddFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ residual, const int8_t* __restrict__ residual_scales, uint32_t* __restrict__ output, int8_t* __restrict__ output_scales, int channels, int dimension, float survival_prob_inv, bool is_skipped)
 {
 	const int s_idx = blockIdx.y * dimension + blockIdx.x;
 	constexpr int warps_per_block = threads_per_block >> 5;
-	extern __shared__ float smem_pool[];
-	float* smem_results = smem_pool;
+	extern __shared__ float pool_smem[];
+	float* smem_results = pool_smem;
 	__shared__ float s_final_max, warp_red[warps_per_block];
 	const int lane_id = threadIdx.x & 31;
 	const int num_u32 = channels >> 3, num_groups = channels >> 5;
@@ -925,8 +737,8 @@ __global__ void __launch_bounds__(threads_per_block, 4) residualAddFwdKernel(con
 	for (int v_idx = threadIdx.x; v_idx < num_groups; v_idx += threads_per_block)
 	{
 		const float s_res = dequantize_scale(residual_scales[s_idx * num_groups + v_idx]);
-		const float s_in = dequantize_scale(input_scales[s_idx * num_groups + v_idx]);
-		const uint4 val_v4 = input_v4_ptr[v_idx];
+		const float s_in = is_skipped ? 0.0f : dequantize_scale(input_scales[s_idx * num_groups + v_idx]);
+		const uint4 val_v4 = is_skipped ? make_uint4(0, 0, 0, 0) : input_v4_ptr[v_idx];
 		const uint4 res_v4 = residual_v4_ptr[v_idx];
 		const auto& val_v4_ptr = reinterpret_cast<const uint32_t(&)[4]>(val_v4);
 		const auto& res_v4_ptr = reinterpret_cast<const uint32_t(&)[4]>(res_v4);

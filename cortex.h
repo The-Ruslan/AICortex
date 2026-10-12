@@ -402,12 +402,21 @@ private:
 		blocks_data.copy(exp.blocks_data, 0, exp.blocks_data.size(), 0, exp.blocks_data.size(), stream_forward.get());
 		blocks_data_scales.copy(exp.blocks_data_scales, 0, exp.blocks_data_scales.size(), 0, exp.blocks_data_scales.size(), stream_forward.get());
 		const float inv_conv_blocks_size = 1.0f / conv_blocks.size();
+		/*
+		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
+		const auto frame_start = std::chrono::high_resolution_clock::now();
+		*/
 		for (int i = 0; i < conv_blocks.size(); i++)
 		{
-			if (!meta_forward) exp.stochasticDepth[i] = get_gen_value(1.0f - i * 0.5f * inv_conv_blocks_size);
+			if (!meta_forward) exp.stochasticDepth[i] = 0;//get_gen_value(1.0f - i * 0.5f * inv_conv_blocks_size);
 			const bool final_block = i == conv_blocks.size() - 1;
 			conv_blocks[i]->forward(blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), final_block ? exp.visaud_fwd.data() : blocks_data.data() + (i + 1) * (blocks_data.size() / conv_blocks.size()), final_block ? exp.visaud_fwd_scales.data() : blocks_data_scales.data() + (i + 1) * (blocks_data_scales.size() / conv_blocks.size()), true, exp.stochasticDepth[i]);
 		}
+		/*
+		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
+		const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
+		std::cout << "[SYSTEM LOG] Run pass has finished for " << frame_end.count() << " ms." << std::endl;
+		*/
 		mamba->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
 		if (work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_SELF && !meta_forward)
 		{
@@ -660,7 +669,7 @@ public:
 			dimension = stride == 2 ? dimension >> 1 : dimension;
 			const float progress_out = (i + 1) * inv_depth;
 			const int output_channels = (std::lround(base_channels + (final_channels - base_channels) * progress_out * progress_out) + 31) & ~31;
-			const int middle_channels = (std::lround(output_channels * (4.0f - 2.0f * progress_out)) + 31) & ~31;
+			const int middle_channels = (std::lround(output_channels * (middle_channels_factor - (middle_channels_factor >> 1) * progress_out)) + 31) & ~31;
 			conv_blocks.push_back(std::make_unique<Block>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
 													 stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
 													 &pipo_db, &pipo_db_num_groups, std::min(3 + (i & ~1), 11),
