@@ -533,31 +533,16 @@ __global__ void convDepthwiseFwdKernel(const uint32_t* __restrict__ input, const
 	constexpr int warps_per_block = threads_per_block >> 5,
 				  padding = kernel_size >> 1,
 				  k_sq = kernel_size * kernel_size,
-				  k_sq_padded = ((k_sq << 2) + 31) & ~31,
 				  k_bound = (k_sq >> 2) << 2;
 	const int group_idx = blockIdx.x * warps_per_block + warp_id;
 	const int outc = (group_idx << 5) + lane_id;
-	__shared__ uint32_t smem_all_warps[warps_per_block][k_sq_padded];
-	uint32_t* smem_in = smem_all_warps[warp_id];
 	const int h_in_start = (spatial_idx_out >> (__ffs(Dimension_out) - 1)) * stride - padding;
 	const int w_in_start = (spatial_idx_out & (Dimension_out - 1)) * stride - padding;
 	const int u32_stride_in = InC >> 3, groups_per_in = InC >> 5;
-	uint4* smem_in_v4 = reinterpret_cast<uint4*>(smem_in);
-	#pragma unroll
-	for (int i = lane_id; i < (k_sq_padded >> 2); i += 32) smem_in_v4[i] = make_uint4(0, 0, 0, 0);
-	__syncwarp();
-	#pragma unroll
-	for (int i = lane_id; i < (k_sq << 2); i += 32)
-	{
-		const int p_idx = i >> 2;
-		const int cur_h = h_in_start + p_idx / kernel_size;
-		const int cur_w = w_in_start + p_idx % kernel_size;
-		if (cur_h >= 0 && cur_h < Dimension_in && cur_w >= 0 && cur_w < Dimension_in) smem_in[i] = load_u32(input, cur_h * Dimension_in + cur_w, u32_stride_in, (group_idx << 2) + (i & 3));
-	}
-	float acc = __half2float(biases[outc]), acc_arr[4] = {};
+	const __half bias = biases[outc];
+	float acc_arr[4] = {};
 	const int u32_off = lane_id >> 3, shift = lane_id & 7;
 	int k = 0;
-	__syncwarp();
 	for (; k < k_bound; k += 4)
 	{
 		#pragma unroll
@@ -567,9 +552,15 @@ __global__ void convDepthwiseFwdKernel(const uint32_t* __restrict__ input, const
 			const int curr_absolute_idx = curr_k * InC + outc;
 			const uint32_t curr_w_packed = weights[curr_absolute_idx >> 3];
 			const int8_t curr_w_scale = weight_scales[curr_absolute_idx >> 5];
-			const int8_t curr_in_scale = input_scales[((h_in_start + curr_k / kernel_size) * Dimension_in + w_in_start + curr_k % kernel_size) * groups_per_in + group_idx];
-			const int32_t smem_in_val = extract_int4(smem_in[(curr_k << 2) + u32_off], shift);
-			acc_arr[sub_k] = smem_in_val == 0 ? acc_arr[sub_k] : fmaf(smem_in_val * dequantize_scale(curr_in_scale), dequantize_scalar(curr_w_packed, curr_absolute_idx & 7, curr_w_scale), acc_arr[sub_k]);
+			const int cur_h = h_in_start + curr_k / kernel_size;
+			const int cur_w = w_in_start + curr_k % kernel_size;
+			if (cur_h >= 0 && cur_h < Dimension_in && cur_w >= 0 && cur_w < Dimension_in)
+			{
+				const int8_t curr_in_scale = input_scales[(cur_h * Dimension_in + cur_w) * groups_per_in + group_idx];
+				const uint32_t input_packed = load_u32(input, cur_h * Dimension_in + cur_w, u32_stride_in, (group_idx << 2) + u32_off);
+				const int32_t val_int4 = extract_int4(input_packed, shift);
+				if (val_int4 != 0) acc_arr[sub_k] = fmaf(val_int4 * dequantize_scale(curr_in_scale), dequantize_scalar(curr_w_packed, curr_absolute_idx & 7, curr_w_scale), acc_arr[sub_k]);
+			}
 		}
 	}
 	for (; k < k_sq; ++k)
@@ -577,11 +568,17 @@ __global__ void convDepthwiseFwdKernel(const uint32_t* __restrict__ input, const
 		const int curr_absolute_idx = k * InC + outc;
 		const uint32_t curr_w_packed = weights[curr_absolute_idx >> 3];
 		const int8_t curr_w_scale = weight_scales[curr_absolute_idx >> 5];
-		const int8_t curr_in_scale = input_scales[((h_in_start + k / kernel_size) * Dimension_in + w_in_start + k % kernel_size) * groups_per_in + group_idx];
-		const int32_t smem_in_val = extract_int4(smem_in[(k << 2) + u32_off], shift);
-		acc_arr[0] = smem_in_val == 0 ? acc_arr[0] : fmaf(smem_in_val * dequantize_scale(curr_in_scale), dequantize_scalar(curr_w_packed, curr_absolute_idx & 7, curr_w_scale), acc_arr[0]);
+		const int cur_h = h_in_start + k / kernel_size;
+		const int cur_w = w_in_start + k % kernel_size;
+		if (cur_h >= 0 && cur_h < Dimension_in && cur_w >= 0 && cur_w < Dimension_in)
+		{
+			const int8_t curr_in_scale = input_scales[(cur_h * Dimension_in + cur_w) * groups_per_in + group_idx];
+			const uint32_t input_packed = load_u32(input, cur_h * Dimension_in + cur_w, u32_stride_in, (group_idx << 2) + u32_off);
+			const int32_t val_int4 = extract_int4(input_packed, shift);
+			if (val_int4 != 0) acc_arr[0] = fmaf(val_int4 * dequantize_scale(curr_in_scale), dequantize_scalar(curr_w_packed, curr_absolute_idx & 7, curr_w_scale), acc_arr[0]);
+		}
 	}
-	acc = acc_arr[0] + acc_arr[1] + acc_arr[2] + acc_arr[3];
+	const float acc = acc_arr[0] + acc_arr[1] + acc_arr[2] + acc_arr[3] + __half2float(bias);
 	float group_max = fabsf(acc);
 	#pragma unroll
 	for (int offset = 16; offset > 0; offset >>= 1) group_max = fmaxf(group_max, __shfl_xor_sync(0xFFFFFFFF, group_max, offset));
@@ -648,51 +645,38 @@ __global__ void convDepthwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 	const int groups_per_in = InC >> 5;
 	const int in_idx_u32 = inc >> 3;
 	const int shift = inc & 7;
-	__shared__ uint32_t smem_all_windows[warps_per_block][k_sq];
-	__shared__ float smem_all_scales[warps_per_block][k_sq], smem_acc[threads_per_block][chunk_size];
-	uint32_t* s_window_in = smem_all_windows[warp_id];
-	float* s_window_scales = smem_all_scales[warp_id];
 	const int NHW_out = Dimension_out * Dimension_out;
 	for (int chunk_start = 0; chunk_start < k_sq; chunk_start += chunk_size)
 	{
-		#pragma unroll
-		for (int c = 0; c < chunk_size; ++c) smem_acc[threadIdx.x][c] = 0.0f;
+		float register_acc[chunk_size] = {};
 		for (int p = 0; p < NHW_out; ++p)
 		{
 			const float go = static_cast<float>(grad_output[p * InC + inc]);
 			const int h_in_base = (p >> log2_dim_out) * stride - padding;
 			const int w_in_base = (p & mask_dim_out) * stride - padding;
-			#pragma unroll 2
-			for (int k = lane_id; k < k_sq; k += 32)
-			{
-				const int h_in = h_in_base + k / kernel_size;
-				const int w_in = w_in_base + k % kernel_size;
-				if (h_in >= 0 && h_in < Dimension_in && w_in >= 0 && w_in < Dimension_in)
-				{
-					const int spatial_idx_in = h_in * Dimension_in + w_in;
-					s_window_in[k] = load_u32(input, spatial_idx_in, u32_stride_in, in_idx_u32);
-					s_window_scales[k] = dequantize_scale(input_scales[spatial_idx_in * groups_per_in + group_idx]);
-				}
-				else
-				{
-					s_window_in[k] = 0;
-					s_window_scales[k] = 0.0f;
-				}
-			}
-			__syncwarp();
 			#pragma unroll
 			for (int c = 0; c < chunk_size; ++c)
 			{
 				const int k = chunk_start + c;
-				if (k < k_sq) smem_acc[threadIdx.x][c] = fmaf(extract_int4(s_window_in[k], shift) * s_window_scales[k], go, smem_acc[threadIdx.x][c]);
+				if (k < k_sq)
+				{
+					const int h_in = h_in_base + k / kernel_size;
+					const int w_in = w_in_base + k % kernel_size;
+					if (h_in >= 0 && h_in < Dimension_in && w_in >= 0 && w_in < Dimension_in)
+					{
+						const int spatial_idx_in = h_in * Dimension_in + w_in;
+						const int8_t s_quant = input_scales[spatial_idx_in * groups_per_in + group_idx];
+						const uint32_t input_packed = load_u32(input, spatial_idx_in, u32_stride_in, in_idx_u32);
+						register_acc[c] = fmaf(dequantize_scalar(input_packed, shift, s_quant), go, register_acc[c]);
+					}
+				}
 			}
-			__syncwarp();
 		}
 		#pragma unroll
 		for (int c = 0; c < chunk_size; ++c)
 		{
 			const int k = chunk_start + c;
-			if (k < k_sq) grad_weights[k * InC + inc] = static_cast<T>(smem_acc[threadIdx.x][c]);
+			if (k < k_sq) grad_weights[k * InC + inc] = static_cast<T>(register_acc[c]);
 		}
 	}
 }
@@ -721,7 +705,7 @@ __global__ void convDepthwiseBwdGradBiasKernel(const T* __restrict__ grad_output
 	if ((lane_id & 1) == 0) *reinterpret_cast<__half2*>(grad_biases + outc) = __floats2half2_rn(sum, neighbor_sum);
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void __launch_bounds__ (threads_per_block, 4) residualAddFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ residual, const int8_t* __restrict__ residual_scales, uint32_t* __restrict__ output, int8_t* __restrict__ output_scales, int channels, int dimension, float survival_prob_inv, bool is_skipped)
+__global__ void __launch_bounds__(threads_per_block, 4) residualAddFwdKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ residual, const int8_t* __restrict__ residual_scales, uint32_t* __restrict__ output, int8_t* __restrict__ output_scales, int channels, int dimension, float survival_prob_inv, bool is_skipped)
 {
 	const int s_idx = blockIdx.y * dimension + blockIdx.x;
 	constexpr int warps_per_block = threads_per_block >> 5;
