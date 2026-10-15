@@ -14,9 +14,6 @@ private:
 	int *total_size_grad_weights, *total_size_grad_biases;
 	const float learning_rate, f_penalty;
 public:
-	const uint32_t* get_weights_ptr()		const { return weights.data(); }
-	const int8_t*   get_weight_scales_ptr()	const { return weight_scales.data(); }
-	const __half*   get_biases_ptr()		const { return biases.data(); }
 	void saveToFile(std::string pathFile) const
 	{
 		std::filesystem::path file_path(pathFile);
@@ -104,12 +101,11 @@ public:
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales, universal_vector<uint32_t>& output, universal_vector<int8_t>& output_scales)
 	{
-		dim3 block(gpu_block_threads);
 		if (kernel_size > 1)
 		{
-			dim3 grid((in_channels + block.x - 1) / block.x, dimension_out, dimension_out);
+			dim3 grid((in_channels + gpu_block_threads - 1) / gpu_block_threads, dimension_out, dimension_out);
 			#define LAUNCH_CONV_FWD_KERNEL(K_SIZE) \
-				LAUNCH_KERNEL(convDepthwiseFwdKernel<K_SIZE>, grid, block, 0, stream_forward, input, weights.data(), input_scales, weight_scales.data(), biases.data(), output.data(), output_scales.data(), in_channels, dimension_in, dimension_out, stride)
+				LAUNCH_KERNEL(convDepthwiseFwdKernel<K_SIZE>, grid, gpu_block_threads, 0, stream_forward, input, weights.data(), input_scales, weight_scales.data(), biases.data(), output.data(), output_scales.data(), in_channels, dimension_in, dimension_out, stride)
 			switch (kernel_size)
 			{
 				case 3:  LAUNCH_CONV_FWD_KERNEL(3);  break;
@@ -117,28 +113,32 @@ public:
 				case 7:  LAUNCH_CONV_FWD_KERNEL(7);  break;
 				case 9:  LAUNCH_CONV_FWD_KERNEL(9);  break;
 				case 11: LAUNCH_CONV_FWD_KERNEL(11); break;
-				default: throw std::runtime_error("Unsupported kernel size: " + kernel_size); break;
+				case 13: LAUNCH_CONV_FWD_KERNEL(13); break;
+				case 15: LAUNCH_CONV_FWD_KERNEL(15); break;
+				case 17: LAUNCH_CONV_FWD_KERNEL(17); break;
+				case 19: LAUNCH_CONV_FWD_KERNEL(19); break;
+				case 21: LAUNCH_CONV_FWD_KERNEL(21); break;
+				default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 			}
 			#undef LAUNCH_CONV_FWD_KERNEL
 		}
 		else
 		{
-			dim3 grid((out_channels + block.x - 1) / block.x, dimension_out, dimension_out);
-			LAUNCH_KERNEL(convPointwiseFwdKernel<>, grid, block, 0, stream_forward, input, weights.data(), input_scales, weight_scales.data(), biases.data(), output.data(), output_scales.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			dim3 grid((out_channels + gpu_block_threads - 1) / gpu_block_threads, dimension_out, dimension_out);
+			LAUNCH_KERNEL(convPointwiseFwdKernel<>, grid, gpu_block_threads, 0, stream_forward, input, weights.data(), input_scales, weight_scales.data(), biases.data(), output.data(), output_scales.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
 		}
 	}
 	void backward(const universal_vector<type_gradients>& grad_output, const uint32_t* input, const int8_t* input_scales, universal_vector<type_gradients>& grad_input)
 	{
-		dim3 block_b(gpu_block_threads);
 		if (kernel_size > 1)
 		{
-			dim3 grid_b((in_channels + block_b.x - 1) / block_b.x);
-			dim3 grid_w((in_channels + block_b.x - 1) / block_b.x);
-			dim3 grid_i((in_channels + block_b.x - 1) / block_b.x, dimension_in, dimension_in);
-			LAUNCH_KERNEL((convDepthwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, block_b, 0, stream_backward, grad_output.data(), grad_biases.data(), in_channels, dimension_out * dimension_out);
+			dim3 grid_b((in_channels + gpu_block_threads - 1) / gpu_block_threads);
+			dim3 grid_w(grid_b.x);
+			dim3 grid_i(grid_b.x, dimension_in, dimension_in);
+			LAUNCH_KERNEL((convDepthwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, gpu_block_threads, 0, stream_backward, grad_output.data(), grad_biases.data(), in_channels, dimension_out * dimension_out);
 			#define LAUNCH_CONV_BWD_KERNEL(K_SIZE) \
-				LAUNCH_KERNEL((convDepthwiseBwdGradWeightKernel<std::remove_pointer_t<decltype(grad_weights.data())>, K_SIZE>), grid_w, block_b, 0, stream_backward, input, input_scales, grad_output.data(), grad_weights.data(), in_channels, dimension_in, dimension_out, stride); \
-				LAUNCH_KERNEL((convDepthwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>, K_SIZE>), grid_i, block_b, 0, stream_backward, grad_output.data(), master_weights.data(), grad_input.data(), in_channels, dimension_in, dimension_out, stride)
+				LAUNCH_KERNEL((convDepthwiseBwdGradWeightKernel<std::remove_pointer_t<decltype(grad_weights.data())>, K_SIZE>), grid_w, gpu_block_threads, 0, stream_backward, input, input_scales, grad_output.data(), grad_weights.data(), in_channels, dimension_in, dimension_out, stride); \
+				LAUNCH_KERNEL((convDepthwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>, K_SIZE>), grid_i, gpu_block_threads, 0, stream_backward, grad_output.data(), master_weights.data(), grad_input.data(), in_channels, dimension_in, dimension_out, stride)
 			switch (kernel_size)
 			{
 				case 3:  LAUNCH_CONV_BWD_KERNEL(3);  break;
@@ -146,20 +146,25 @@ public:
 				case 7:  LAUNCH_CONV_BWD_KERNEL(7);  break;
 				case 9:  LAUNCH_CONV_BWD_KERNEL(9);  break;
 				case 11: LAUNCH_CONV_BWD_KERNEL(11); break;
+				case 13: LAUNCH_CONV_BWD_KERNEL(13); break;
+				case 15: LAUNCH_CONV_BWD_KERNEL(15); break;
+				case 17: LAUNCH_CONV_BWD_KERNEL(17); break;
+				case 19: LAUNCH_CONV_BWD_KERNEL(19); break;
+				case 21: LAUNCH_CONV_BWD_KERNEL(21); break;
 				default: throw std::runtime_error("Unsupported kernel size: " + kernel_size); break;
 			}
 			#undef LAUNCH_CONV_BWD_KERNEL
 		}
 		else
 		{
-			dim3 grid_b((out_channels + block_b.x - 1) / block_b.x);
-			LAUNCH_KERNEL((convPointwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, block_b, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_biases.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			dim3 grid_b((out_channels + gpu_block_threads - 1) / gpu_block_threads);
+			LAUNCH_KERNEL((convPointwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_biases.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
 			constexpr int block_w_size = 32;
 			dim3 block_w(block_w_size, block_w_size);
 			dim3 grid_w(out_channels / block_w_size, in_channels / block_w_size);
 			LAUNCH_KERNEL((convPointwiseBwdGradWeightKernel<std::remove_pointer_t<decltype(grad_weights.data())>, block_w_size, gpu_block_threads>), grid_w, block_w, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_weights.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
-			dim3 grid_in((out_channels + block_b.x - 1) / block_b.x, dimension_out, dimension_out);
-			LAUNCH_KERNEL((convPointwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>>), grid_in, block_b, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), master_weights.data(), grad_input.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			dim3 grid_in(grid_b.x, dimension_out, dimension_out);
+			LAUNCH_KERNEL((convPointwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>>), grid_in, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), master_weights.data(), grad_input.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
 		}
 		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_weights.data())>>{}, real_size_weight, stream_backward);
 		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_biases.data())>>{}, out_channels, stream_backward);

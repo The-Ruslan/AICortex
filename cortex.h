@@ -171,8 +171,8 @@ class Cortex
 private:
 	inline bool get_gen_value(float survival_prob = 1.0f)
 	{
-		if (survival_prob >= 1.0f) return true;
-		if (survival_prob <= 0.0f) return false;
+		if (survival_prob >= 1.0f - epsilon) return true;
+		if (survival_prob <= epsilon) return false;
 		return getFastRandomFloatBoundedUniform(generateUniqueSeed(), 1.0f) < survival_prob;
     }
 	int fps, pipo_db = 0, pipo_db_num_groups = 0;
@@ -399,25 +399,25 @@ private:
 			exp.blocks_data.copy(exp.visaud_fwd, 0, exp.blocks_data.size(), 0, exp.visaud_fwd.size(), stream_forward.get());
 			exp.blocks_data_scales.copy(exp.visaud_fwd_scales, 0, exp.blocks_data_scales.size(), 0, exp.visaud_fwd_scales.size(), stream_forward.get());
 		}
-		blocks_data.copy(exp.blocks_data, 0, exp.blocks_data.size(), 0, exp.blocks_data.size(), stream_forward.get());
-		blocks_data_scales.copy(exp.blocks_data_scales, 0, exp.blocks_data_scales.size(), 0, exp.blocks_data_scales.size(), stream_forward.get());
-		const float inv_conv_blocks_size = 1.0f / conv_blocks.size();
 		/*
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		const auto frame_start = std::chrono::high_resolution_clock::now();
 		*/
+		blocks_data.copy(exp.blocks_data, 0, exp.blocks_data.size(), 0, exp.blocks_data.size(), stream_forward.get());
+		blocks_data_scales.copy(exp.blocks_data_scales, 0, exp.blocks_data_scales.size(), 0, exp.blocks_data_scales.size(), stream_forward.get());
+		const float inv_conv_blocks_size = 1.0f / conv_blocks.size();
 		for (int i = 0; i < conv_blocks.size(); i++)
 		{
-			if (!meta_forward) exp.stochasticDepth[i] = 0;//get_gen_value(1.0f - i * 0.5f * inv_conv_blocks_size);
+			if (!meta_forward) exp.stochasticDepth[i] = get_gen_value(1.0f - i * 0.5f * inv_conv_blocks_size);
 			const bool final_block = i == conv_blocks.size() - 1;
 			conv_blocks[i]->forward(blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), final_block ? exp.visaud_fwd.data() : blocks_data.data() + (i + 1) * (blocks_data.size() / conv_blocks.size()), final_block ? exp.visaud_fwd_scales.data() : blocks_data_scales.data() + (i + 1) * (blocks_data_scales.size() / conv_blocks.size()), true, exp.stochasticDepth[i]);
 		}
+		mamba->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
 		/*
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
 		std::cout << "[SYSTEM LOG] Run pass has finished for " << frame_end.count() << " ms." << std::endl;
 		*/
-		mamba->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
 		if (work_mode.load(std::memory_order_acquire) != E_Workmode::TRAIN_BY_SELF && !meta_forward)
 		{
 			checkCudaError(cudaStreamSynchronize(stream_forward.get()));
