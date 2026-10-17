@@ -3,7 +3,7 @@
 #include "kernels.h"
 #include "exp.h"
 
-template<typename T = __half>
+template <typename T>
 struct EntropyOP
 {
 	__device__ __forceinline__ float operator()(const T t_p) const
@@ -43,18 +43,19 @@ public:
 			w_bytes = align16(blocks_data_size * sizeof(int8_t));
 			entry.blocks_data_scales.resize(reinterpret_cast<int8_t*>(current_host_main_ptr), blocks_data_size, MemoryType::PinnedHost);
 			current_host_main_ptr += w_bytes;
-			entry.stochasticDepth.resize(blocks_size, 0);
+			entry.stochasticDepth.resize(blocks_size);
 		}
 	}
-	void addEntry(const S_Experience& exp, universal_vector<__half>& probs_fwd, float predicted_score, float real_score, cudaStream_t stream = 0)
+	template <typename T>
+	void addEntry(const S_Experience& exp, universal_vector<T>& probs_fwd, float predicted_score, float real_score, cudaStream_t stream = 0)
 	{
-		const float entropy_sum = probs_fwd.transform_reduce<float>(EntropyOP<std::remove_pointer_t<decltype(probs_fwd.data())>>{}, probs_fwd.size(), stream) / probs_fwd.size();
+		const float entropy_sum = probs_fwd.template transform_reduce<float>(EntropyOP<T>{}, probs_fwd.size(), stream) / probs_fwd.size();
 		const float predict_err = std::abs(predicted_score - real_score);
-		avg_ent = fmaf(momentum, avg_ent, (1.0f - momentum) * entropy_sum);
-		avg_huber = fmaf(momentum, avg_huber, (1.0f - momentum) * predict_err);
-		const float shame_score = entropy_sum / (avg_ent + epsilon) + predict_err / (avg_huber + epsilon);
+		const float one_minus_momentum = 1.0f - momentum;
+		avg_ent = fmaf(momentum, avg_ent, one_minus_momentum * entropy_sum);
+		avg_huber = fmaf(momentum, avg_huber, one_minus_momentum * predict_err);
 		history_buffer[history_index](exp, stream);
-		history_buffer[history_index].shame_score = shame_score;
+		history_buffer[history_index].shame_score = entropy_sum / (avg_ent + epsilon) + predict_err / (avg_huber + epsilon);
 	}
 	void updateEntries(cudaStream_t stream = 0)
 	{

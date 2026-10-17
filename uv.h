@@ -3,9 +3,9 @@
 #include "dc.h"
 #include "bc.h"
 
-template<typename T>
+template <typename T>
 __global__ void fillUniversalVectorKernel(T* d_out, T value, size_t size) { for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) d_out[idx] = value; }
-template<typename Tin, typename Tout, typename Op>
+template <typename Tin, typename Tout, typename Op>
 __global__ void transformReduceKernel(const Tin* d_in, Tout* d_global_res, Op op, size_t size)
 {
 	Tout sum = 0;
@@ -22,13 +22,13 @@ __global__ void transformReduceKernel(const Tin* d_in, Tout* d_global_res, Op op
 	}
 	if (threadIdx.x == 0) atomicAdd(d_global_res, sum);
 }
-template<typename Op>
+template <typename Op>
 __global__ void forEachNUniversalVectorKernel(Op op, size_t n) { for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) op(i); }
 
 enum class VectorMode { Allocation, View };
 enum class MemoryType { Device, PinnedHost, Default };
 
-template<typename T>
+template <typename T>
 class universal_vector
 {
 private:
@@ -36,11 +36,11 @@ private:
 	size_t m_size = 0, m_capacity = 0;
 	MemoryType m_mem_type = MemoryType::Device;
 	VectorMode m_mode = VectorMode::Allocation;
-	template<typename KernelPtr>
+	template <typename KernelPtr>
     struct SizeCache { static size_t* get() { static size_t instance = 0; return &instance; } };
 public:
 	using value_type = T;
-	template<typename... Args>
+	template <typename... Args>
 	size_t get_optimal_blocks(void (*kernel)(Args...)) const
 	{
 		auto* cached_blocks = SizeCache<void(*)(Args...)>::get();
@@ -67,7 +67,7 @@ public:
 	const T& operator[](size_t idx) const { return m_data[idx]; }
 	T* begin() { return m_data; }
 	T* end() { return m_data + m_size; }
-	template<typename U>
+	template <typename U>
 	void fill(size_t start, size_t end, U value, cudaStream_t stream = 0)
 	{
 		if (m_size == 0 || start >= end) return;
@@ -135,7 +135,7 @@ public:
 		if (new_size > m_capacity) reserve(new_size, mem_type);
 		m_size = new_size;
 	}
-	template<typename U>
+	template <typename U>
 	void resize(size_t new_size, U value, MemoryType mem_type = MemoryType::Default)
 	{
 		if (m_size == new_size || m_mode == VectorMode::View) return;
@@ -151,7 +151,7 @@ public:
 		m_mem_type = mem_type;
 		m_mode = VectorMode::View;
 	}
-	template<typename U>
+	template <typename U>
 	void resize(T* external_ptr, size_t new_size, U value, MemoryType mem_type = MemoryType::Default)
 	{
 		m_data = external_ptr;
@@ -224,7 +224,7 @@ public:
 		}
 		return *this;
 	}
-	template<typename Tout, typename Op>
+	template <typename Tout, typename Op>
 	Tout transform_reduce(Op op, size_t end, cudaStream_t stream = 0) const
 	{
 		if (m_size == 0 || end > m_size) return 0;
@@ -244,7 +244,7 @@ public:
 		checkCudaError(cudaMemcpy(&host_result, cache.d_ptr, sizeof(Tout), cudaMemcpyDefault));
 		return host_result;
 	}
-	template<typename Op>
+	template <typename Op>
 	void for_each_n(size_t n, Op op, cudaStream_t stream = 0)
 	{
 		if (n == 0) return;

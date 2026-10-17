@@ -11,7 +11,7 @@ struct LambdaWeightsOP
 class Critic
 {
 private:
-	const int in_channels, dimension_in, real_size_weight, out_channels;
+	const int in_channels, out_channels, dimension_in, real_size_weight;
 	universal_vector<__half> weights1, weights2, weights_lambda, grad_weights, grad_biases, grad_lambda, hidden_pool, hidden_state;
 	universal_vector<float> score_output, trace_w1, trace_lambda;
 	cudaStream_t stream_forward, stream_backward;
@@ -127,7 +127,7 @@ public:
 		LAUNCH_KERNEL(updateParamsKernel<std::remove_pointer_t<decltype(weights_lambda.data())>>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, weights_lambda.data(), grad_lambda.data(), real_size_weight, clip_op(sum_sq_l), learning_rate, f_penalty);
 	}
 	void reset(cudaStream_t stream_lnk = 0) 
-    { 
+    {
         hidden_state.fill(0, hidden_state.size(), 0, stream_lnk); 
         trace_w1.fill(0, trace_w1.size(), 0.0f, stream_lnk);
         trace_lambda.fill(0, trace_lambda.size(), 0.0f, stream_lnk);

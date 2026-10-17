@@ -41,7 +41,7 @@ public:
 		file.read(reinterpret_cast<char*>(biases_tmp.data()), out_channels * sizeof(__half));
 		file.close();
 		biases.copy(biases_tmp, 0, out_channels, 0, out_channels, 0);
-		LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
 		checkCudaError(cudaStreamSynchronize(0));
 	}
 	ConvLayer(int inChannels, int outChannels, int kernelSize, int str_ide, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
@@ -95,7 +95,7 @@ public:
 		else
 		{
 			generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / (in_channels + out_channels)), 0, 1234);
-			LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+			LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
 			generateNormalRandoms(biases, out_channels, std::sqrtf(2.0f / out_channels), 0, 5678);
 		}
 	}
@@ -135,10 +135,10 @@ public:
 			dim3 grid_b((in_channels + gpu_block_threads - 1) / gpu_block_threads);
 			dim3 grid_w(grid_b.x);
 			dim3 grid_i(grid_b.x, dimension_in, dimension_in);
-			LAUNCH_KERNEL((convDepthwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, gpu_block_threads, 0, stream_backward, grad_output.data(), grad_biases.data(), in_channels, dimension_out * dimension_out);
+			LAUNCH_KERNEL(convDepthwiseBwdGradBiasKernel<>, grid_b, gpu_block_threads, 0, stream_backward, grad_output.data(), grad_biases.data(), in_channels, dimension_out * dimension_out);
 			#define LAUNCH_CONV_BWD_KERNEL(K_SIZE) \
-				LAUNCH_KERNEL((convDepthwiseBwdGradWeightKernel<std::remove_pointer_t<decltype(grad_weights.data())>, K_SIZE>), grid_w, gpu_block_threads, 0, stream_backward, input, input_scales, grad_output.data(), grad_weights.data(), in_channels, dimension_in, dimension_out, stride); \
-				LAUNCH_KERNEL((convDepthwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>, K_SIZE>), grid_i, gpu_block_threads, 0, stream_backward, grad_output.data(), master_weights.data(), grad_input.data(), in_channels, dimension_in, dimension_out, stride)
+				LAUNCH_KERNEL(convDepthwiseBwdGradWeightKernel<K_SIZE>, grid_w, gpu_block_threads, 0, stream_backward, input, input_scales, grad_output.data(), grad_weights.data(), in_channels, dimension_in, dimension_out, stride); \
+				LAUNCH_KERNEL(convDepthwiseBwdGradInputKernel<K_SIZE>, grid_i, gpu_block_threads, 0, stream_backward, grad_output.data(), master_weights.data(), grad_input.data(), in_channels, dimension_in, dimension_out, stride)
 			switch (kernel_size)
 			{
 				case 3:  LAUNCH_CONV_BWD_KERNEL(3);  break;
@@ -158,13 +158,12 @@ public:
 		else
 		{
 			dim3 grid_b((out_channels + gpu_block_threads - 1) / gpu_block_threads);
-			LAUNCH_KERNEL((convPointwiseBwdGradBiasKernel<std::remove_pointer_t<decltype(grad_output.data())>>), grid_b, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_biases.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
-			constexpr int block_w_size = 32;
-			dim3 block_w(block_w_size, block_w_size);
-			dim3 grid_w(out_channels / block_w_size, in_channels / block_w_size);
-			LAUNCH_KERNEL((convPointwiseBwdGradWeightKernel<std::remove_pointer_t<decltype(grad_weights.data())>, block_w_size, gpu_block_threads>), grid_w, block_w, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_weights.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			LAUNCH_KERNEL(convPointwiseBwdGradBiasKernel<>, grid_b, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_biases.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			dim3 block_w(dim_block_pw_bwd_gw_size, dim_block_pw_bwd_gw_size);
+			dim3 grid_w(out_channels / dim_block_pw_bwd_gw_size, in_channels / dim_block_pw_bwd_gw_size);
+			LAUNCH_KERNEL(convPointwiseBwdGradWeightKernel<>, grid_w, block_w, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), grad_weights.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
 			dim3 grid_in(grid_b.x, dimension_out, dimension_out);
-			LAUNCH_KERNEL((convPointwiseBwdGradInputKernel<std::remove_pointer_t<decltype(grad_input.data())>>), grid_in, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), master_weights.data(), grad_input.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
+			LAUNCH_KERNEL(convPointwiseBwdGradInputKernel<>, grid_in, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output.data(), master_weights.data(), grad_input.data(), in_channels, out_channels, dimension_in, dimension_out, stride);
 		}
 		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_weights.data())>>{}, real_size_weight, stream_backward);
 		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<std::remove_pointer_t<decltype(grad_biases.data())>>{}, out_channels, stream_backward);
@@ -173,8 +172,8 @@ public:
 			const float norm = sqrtf(sum_sq + epsilon);
 			return norm > 1.0f ? 1.0f / norm : 1.0f;
 		};
-		LAUNCH_KERNEL((updateParamsKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), learning_rate, f_penalty);
-		LAUNCH_KERNEL((updateParamsKernel<std::remove_pointer_t<decltype(biases.data())>>), std::max(1, (out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, biases.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), learning_rate, 0.0f);
-		LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(master_weights.data())>>), std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), learning_rate, f_penalty);
+		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, biases.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), learning_rate, 0.0f);
+		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
 	}
 };

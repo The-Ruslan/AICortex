@@ -43,7 +43,7 @@ inline size_t align16(size_t bytes) { return (bytes + 15) & ~15; };
 
 using type_gradients = float;
 
-template<typename T = __half>
+template <typename T>
 struct SquareOp
 {
 	__device__ __forceinline__ float operator()(const T x) const

@@ -10,9 +10,9 @@ private:
 	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
 	cudaStream_t stream_forward, stream_backward;
 	const float survival_prob_inv;
-	universal_vector<type_gradients> grad_buffer_a, grad_buffer_b, grad_residual;
 	universal_vector<uint32_t> buffer_a, buffer_b;
 	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
+	universal_vector<type_gradients> grad_buffer_a, grad_buffer_b, grad_residual;
 public:
 	void saveToFile(std::string pathFile) const
 	{
@@ -48,6 +48,7 @@ public:
 				  final_stride = input_dimension == final_dimension ? 1 : stride;
 		*pipo_db = *pipo_db < local_pipo_db ? local_pipo_db : *pipo_db;
 		*pipo_db_num_groups = *pipo_db_num_groups < local_pipo_db_num_groups ? local_pipo_db_num_groups : *pipo_db_num_groups;
+		conv_layers.reserve(4);
 		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, input_channels, kernel_size_dw, final_stride, input_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
 		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, middle_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
 		conv_layers.push_back(std::make_unique<ConvLayer>(middle_channels, output_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
@@ -65,9 +66,9 @@ public:
 		buffer_b_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_b_scales), *pipo_db_num_groups, MemoryType::Device);
 		if (!is_in_inference)
 		{
-			grad_buffer_a.resize(reinterpret_cast<type_gradients*>(dev_side_ptr_grad_buffer_a), *pipo_db, MemoryType::Device);
-			grad_buffer_b.resize(reinterpret_cast<type_gradients*>(dev_side_ptr_grad_buffer_b), *pipo_db, MemoryType::Device);
-			grad_residual.resize(reinterpret_cast<type_gradients*>(dev_side_ptr_grad_residual), *pipo_db, MemoryType::Device);
+			grad_buffer_a.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_buffer_a.data())>*>(dev_side_ptr_grad_buffer_a), *pipo_db, MemoryType::Device);
+			grad_buffer_b.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_buffer_b.data())>*>(dev_side_ptr_grad_buffer_b), *pipo_db, MemoryType::Device);
+			grad_residual.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_residual.data())>*>(dev_side_ptr_grad_residual), *pipo_db, MemoryType::Device);
 		}
 	}
     void forward(const uint32_t* input, const int8_t* input_scales, uint32_t* output, int8_t* output_scales, bool train_mode = true, bool is_survived = true)
@@ -84,7 +85,7 @@ public:
 		conv_layers[0]->forward(input, input_scales, buffer_a, buffer_a_scales);
 		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b, buffer_b_scales);
 		dim3 blocks_grid(final_dimension, final_dimension);
-		LAUNCH_KERNEL((residualAddBwdKernel<std::remove_pointer_t<decltype(grad_residual.data())>>), blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f);
+		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f);
 		if (is_survived)
 		{
 			conv_layers[2]->backward(grad_input_output, buffer_b.data(), buffer_b_scales.data(), grad_buffer_b);
