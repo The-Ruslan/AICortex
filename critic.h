@@ -1,4 +1,3 @@
-//critic.h
 #pragma once
 #include "kernels.h"
 

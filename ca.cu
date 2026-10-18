@@ -1,4 +1,4 @@
-//ca.cu
+#pragma once
 #include "kernels.h"
 
 struct AudioProcessorOP

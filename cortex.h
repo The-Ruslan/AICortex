@@ -1,12 +1,11 @@
-//cortex.h
 #pragma once
-#include "block.h"
-#include "mb.h"
+#include "conv_block.h"
+#include "mamba_block.h"
 #include "cs.h"
 #include "ca.h"
 #include "hos.h"
 #include "critic.h"
-#include "cc.h"
+#include "convergence_controller.h"
 
 template <typename T_ogp, typename T_eop>
 struct BackwardStepOP
@@ -177,10 +176,10 @@ private:
     }
 	int fps, pipo_db = 0, pipo_db_num_groups = 0;
 	S_Experience exp;
-	std::vector<std::unique_ptr<Block>> conv_blocks;
+	std::vector<std::unique_ptr<ConvBlock>> conv_blocks;
 	std::unique_ptr<CaptureScreen> screenCapture;
 	std::unique_ptr<CaptureAudio> audioCapture;
-	std::unique_ptr<MambaBlock> mamba;
+	std::unique_ptr<MambaBlock> mamba_block;
 	std::unique_ptr<HallOfShame> hall_of_shame;
 	std::unique_ptr<Critic> critic;
 	std::unique_ptr<ConvergenceController> convergence_controller;
@@ -282,7 +281,7 @@ private:
 					critic->forward(exp.blocks_data.data(), exp.blocks_data_scales.data());
 					const float triggered_score = isScored.load(std::memory_order_acquire);
 					const float real_score = triggered_score > fminimum ? triggered_score : critic->get_score_output();
-					if (has_last_score && hall_of_shame) hall_of_shame->addEntry(exp, mamba->get_mamba_output(), last_score, real_score, stream_exp.get());
+					if (has_last_score && hall_of_shame) hall_of_shame->addEntry(exp, mamba_block->get_output(), last_score, real_score, stream_exp.get());
 					else has_last_score = true;
 					exp_add = false;
 					ready_to_receive_exp = false;
@@ -330,10 +329,10 @@ private:
 	void performBackwardStep(float score, int epoch)
 	{
 		grad_input.fill(0, grad_input.size(), 0, stream_backward.get());
-		const float entropy_sum = mamba->get_mamba_output().transform_reduce<float>(EntropyOP<std::remove_pointer_t<decltype(mamba->get_mamba_output().data())>>{}, mamba->get_mamba_output().size(), stream_backward.get()) / mamba->get_mamba_output().size();
+		const float entropy_sum = mamba_block->get_output().transform_reduce<float>(EntropyOP<std::remove_pointer_t<decltype(mamba_block->get_output().data())>>{}, mamba_block->get_output().size(), stream_backward.get()) / mamba_block->get_output().size();
 		score = fmaf(entropy_sum, fmaxf(0.001f, 0.01f * powf(0.999f, static_cast<float>(epoch))), score) * score_gamma;
-		grad_output.for_each_n(grad_output.size(), BackwardStepOP<std::remove_pointer_t<decltype(grad_output.data())>, std::remove_pointer_t<decltype(mamba->get_mamba_output().data())>>{grad_output.data(), mamba->get_mamba_output().data(), action_ptr.data(), score}, stream_backward.get());
-		mamba->backward(grad_output, exp.visaud_fwd, exp.visaud_fwd_scales, grad_input);
+		grad_output.for_each_n(grad_output.size(), BackwardStepOP<std::remove_pointer_t<decltype(grad_output.data())>, std::remove_pointer_t<decltype(mamba_block->get_output().data())>>{grad_output.data(), mamba_block->get_output().data(), action_ptr.data(), score}, stream_backward.get());
+		mamba_block->backward(grad_output, exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), grad_input);
 		for (int i = conv_blocks.size() - 1; i > -1; i--) conv_blocks[i]->backward(grad_input, blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), exp.stochasticDepth[i]);
 		checkCudaError(cudaStreamSynchronize(stream_backward.get()));
 	}
@@ -354,9 +353,9 @@ private:
 		LAUNCH_KERNEL(NCHWtoNHWCKernel<>, grid, block, 0, stream_forward.get(), raw_visaud_fwd.data(), raw_visaud_fwd.data(), img_resolution, input_channels_first);
 		LAUNCH_KERNEL(quantizeKernel<>, ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), raw_visaud_fwd.size());
 		for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), false, false);
-		mamba->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
+		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data());
 		action_ptr.fill(0, action_ptr.size(), 0, stream_forward.get());
-		LAUNCH_KERNEL(setActionsKernel<>, (mamba->get_mamba_output().size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), mamba->get_mamba_output().data(), action_ptr.data(), mamba->get_mamba_output().size());
+		LAUNCH_KERNEL(setActionsKernel<>, (mamba_block->get_output().size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), mamba_block->get_output().data(), action_ptr.data(), mamba_block->get_output().size());
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		executeActions();
 	}
@@ -412,7 +411,7 @@ private:
 			const bool final_block = i == conv_blocks.size() - 1;
 			conv_blocks[i]->forward(blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), final_block ? exp.visaud_fwd.data() : blocks_data.data() + (i + 1) * (blocks_data.size() / conv_blocks.size()), final_block ? exp.visaud_fwd_scales.data() : blocks_data_scales.data() + (i + 1) * (blocks_data_scales.size() / conv_blocks.size()), true, exp.stochasticDepth[i]);
 		}
-		mamba->forward(exp.visaud_fwd, exp.visaud_fwd_scales);
+		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data());
 		/*
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
@@ -424,7 +423,7 @@ private:
 			return;
 		}
 		action_ptr.fill(0, action_ptr.size(), 0, stream_forward.get());
-		LAUNCH_KERNEL(setActionsKernel<>, (mamba->get_mamba_output().size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), mamba->get_mamba_output().data(), action_ptr.data(), mamba->get_mamba_output().size());
+		LAUNCH_KERNEL(setActionsKernel<>, (mamba_block->get_output().size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), mamba_block->get_output().data(), action_ptr.data(), mamba_block->get_output().size());
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		if (meta_forward) return;
 		executeActions();
@@ -474,7 +473,7 @@ private:
 			float final_shame_score = 0.0f;
 			for (int inner_step = 0; inner_step < 5; ++inner_step)
 			{
-				mamba->reset(stream_backward.get());
+				mamba_block->reset(stream_backward.get());
 				for (size_t idx = 0; idx < meta_seq_len; ++idx)
 				{
 					auto* shame_exp = shame_experiences[start_idx + idx];
@@ -503,7 +502,7 @@ private:
 		if (num_sequences < 1) return;
 		for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx)
 		{
-			mamba->reset(stream_backward.get());
+			mamba_block->reset(stream_backward.get());
 			const size_t start_idx = seq_idx * meta_seq_len;
 			float final_shame_score = 0.0f;
 			for (size_t idx = 0; idx < meta_seq_len; ++idx)
@@ -555,7 +554,7 @@ private:
 			}
 			else
 			{
-				mamba->reset(stream_backward.get());
+				mamba_block->reset(stream_backward.get());
 				critic->reset(stream_backward.get());
 			}
 		}
@@ -584,7 +583,7 @@ public:
 			try 
 			{
 				for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->saveToFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
-				mamba->saveToFile((std::filesystem::path(dir_path) / "mamba.bin").string());
+				mamba_block->saveToFile((std::filesystem::path(dir_path) / "mambas").string());
 				if (critic) critic->saveToFile((std::filesystem::path(dir_path) / "critic.bin").string());
 				std::cout << "[SYSTEM LOG] Data saved successfully to network folder." << std::endl;
 				success = true;
@@ -616,7 +615,7 @@ public:
 			try 
 			{
 				for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->loadFromFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
-				mamba->loadFromFile((std::filesystem::path(dir_path) / "mamba.bin").string());
+				mamba_block->loadFromFile((std::filesystem::path(dir_path) / "mambas").string());
 				if (critic) critic->loadFromFile((std::filesystem::path(dir_path) / "critic.bin").string());
 				std::cout << "[SYSTEM LOG] Data loaded successfully from network folder." << std::endl;
 				success = true;
@@ -639,13 +638,13 @@ public:
 		   size_t computationSpeed = 30,
 		   float learningRate = 0.0001f,
 		   size_t exp_buffer_size_total = meta_seq_len * meta_seq_len) :
-		work_mode(working_mode), isEliminating(is_eliminating), isScored(is_scored),
-		mtx_exp(mtxExp), mtx_running(mtxRunning),
-		cv_exp(cvExp), cv_running(cvRunning),
-		exp_add(expAdd), is_running(isRunning), is_inputing(isInputing), keybinds(key_binds),
 		fps(computationSpeed),
 		dir_path(process_conf_path),
-		learning_rate(learningRate)
+		work_mode(working_mode), isEliminating(is_eliminating), is_inputing(isInputing), isScored(is_scored),
+		mtx_exp(mtxExp), mtx_running(mtxRunning),
+		cv_exp(cvExp), cv_running(cvRunning),
+		exp_add(expAdd), is_running(isRunning),
+		keybinds(key_binds), learning_rate(learningRate)
 	{
 		cudaStream_t temp_stream_fwd, temp_stream_bwd, temp_stream_exp;
         checkCudaError(cudaStreamCreate(&temp_stream_fwd));
@@ -670,20 +669,20 @@ public:
 			const float progress_out = (i + 1) * inv_depth;
 			const int output_channels = (std::lround(base_channels + (final_channels - base_channels) * progress_out * progress_out) + 31) & ~31;
 			const int middle_channels = (std::lround(output_channels * (middle_channels_factor - (middle_channels_factor >> 1) * progress_out)) + 31) & ~31;
-			conv_blocks.push_back(std::make_unique<Block>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
-													 stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
-													 &pipo_db, &pipo_db_num_groups, std::min(3 + (i & ~1), 11),
-													 get_gen_value(1.0f - i * 0.5f * inv_depth), stream_backward.get(),
-													 learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
-													 &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
+			conv_blocks.push_back(std::make_unique<ConvBlock>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
+															  stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
+															  &pipo_db, &pipo_db_num_groups, std::min(3 + (i & ~1), 11),
+															  get_gen_value(1.0f - i * 0.5f * inv_depth), stream_backward.get(),
+															  learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
+															  &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
 			dimension_old = dimension;
 			input_channels = output_channels;
 		}
-		const int output_channels_mamba = keybinds.size() + total_bits_mouse;
+		const int final_output_channels = keybinds.size() + total_bits_mouse, final_output_channels_padded = (final_output_channels + 31) & ~31;
 		const bool is_in_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE || work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE_ON_TRAIN;
 		const bool is_in_inference_on_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE;
 		const bool is_in_inference_on_critic_only = work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY;
-		mamba = std::make_unique<MambaBlock>(output_channels_mamba, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
+		mamba_block = std::make_unique<MambaBlock>(final_channels, final_output_channels_padded, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
 		if (!is_in_inference && !is_in_inference_on_critic_only)
 		{
 			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total);
@@ -701,10 +700,10 @@ public:
 								   align16(conv_blocks.size() * pipo_db_num_groups * sizeof(uint32_t) << 2) +
 								   align16(conv_blocks.size() * pipo_db_num_groups * sizeof(int8_t)) +
 								   align16(pipo_db * sizeof(type_gradients)) * 4 +
-								   align16(output_channels_mamba * sizeof(std::remove_pointer_t<decltype(grad_output.data())>)) +
+								   align16(final_output_channels_padded * sizeof(std::remove_pointer_t<decltype(grad_output.data())>)) +
 								   align16(total_learnable_data * sizeof(std::remove_pointer_t<decltype(meta_backup_data.data())>)) +
 								   align16(total_learnable_data * sizeof(std::remove_pointer_t<decltype(meta_gradient_sum.data())>));
-		total_host_bytes_main += align16((output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type)) * 2;
+		total_host_bytes_main += align16((final_output_channels_padded + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type)) * 2;
 		total_host_bytes_side += (align16(blocks_data_size * sizeof(uint32_t) << 2) + align16(blocks_data_size * sizeof(int8_t))) * exp_buffer_size_total + align16(total_learnable_data_count * sizeof(size_t)) * 2 + align16(total_learnable_data_count * sizeof(void*));
 		global_device_main_arena.resize(total_device_bytes_main, MemoryType::Device);
 		global_device_side_arena.resize(total_device_bytes_side, MemoryType::Device);
@@ -739,9 +738,9 @@ public:
 		screenCapture->initData(dev_main_ptr);
 		audioCapture->initData(dev_main_ptr);
 		for(int i = 0; i < conv_block_depth; ++i) conv_blocks[i]->initData(isLoaded, (std::filesystem::path(dir_path) / std::to_string(i)).string(), dev_main_ptr, host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr, dev_side_ptr_grad_buffer_a, dev_side_ptr_grad_buffer_b, dev_side_ptr_grad_residual, dev_main_ptr_buffer_a, dev_main_ptr_buffer_a_scales, dev_main_ptr_buffer_b, dev_main_ptr_buffer_b_scales);
-		mamba->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba.bin").string(), dev_main_ptr, host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr);
-		w_bytes = align16((output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type));
-		action_ptr.resize(reinterpret_cast<action_type*>(host_main_ptr), (output_channels_mamba + total_bits_per_element - 1) / total_bits_per_element, 0, MemoryType::PinnedHost);
+		mamba_block->initData(isLoaded, (std::filesystem::path(dir_path) / "mambas").string(), dev_main_ptr, host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, host_mad_ptr, host_mao_ptr, dev_side_ptr_grad_buffer_a, dev_side_ptr_grad_residual, dev_main_ptr_buffer_a, dev_main_ptr_buffer_a_scales, dev_main_ptr_buffer_b, dev_main_ptr_buffer_b_scales, pipo_db_num_groups);
+		w_bytes = align16((final_output_channels_padded + total_bits_per_element - 1) / total_bits_per_element * sizeof(action_type));
+		action_ptr.resize(reinterpret_cast<action_type*>(host_main_ptr), (final_output_channels + total_bits_per_element - 1) / total_bits_per_element, 0, MemoryType::PinnedHost);
 		host_main_ptr += w_bytes;
 		action_prevs.resize(reinterpret_cast<action_type*>(host_main_ptr), action_ptr.size(), 0, MemoryType::PinnedHost);
 		host_main_ptr += w_bytes;
@@ -759,8 +758,8 @@ public:
 		w_bytes = align16(conv_blocks.size() * pipo_db_num_groups * sizeof(int8_t));
 		blocks_data_scales.resize(reinterpret_cast<int8_t*>(dev_side_ptr), conv_blocks.size() * pipo_db_num_groups, MemoryType::Device);
 		dev_side_ptr += w_bytes;
-		w_bytes = align16(output_channels_mamba * sizeof(std::remove_pointer_t<decltype(grad_output.data())>));
-		grad_output.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_output.data())>*>(dev_side_ptr), output_channels_mamba, MemoryType::Device);
+		w_bytes = align16(final_output_channels_padded * sizeof(std::remove_pointer_t<decltype(grad_output.data())>));
+		grad_output.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_output.data())>*>(dev_side_ptr), final_output_channels, MemoryType::Device);
 		dev_side_ptr += w_bytes;
 		w_bytes = align16(pipo_db * sizeof(type_gradients));
 		grad_input.resize(reinterpret_cast<type_gradients*>(dev_side_ptr), pipo_db, MemoryType::Device);

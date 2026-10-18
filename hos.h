@@ -1,4 +1,3 @@
-//hos.h
 #pragma once
 #include "kernels.h"
 #include "exp.h"

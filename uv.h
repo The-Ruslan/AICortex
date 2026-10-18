@@ -1,7 +1,7 @@
 #pragma once
 #include <algorithm>
-#include "dc.h"
-#include "bc.h"
+#include "device_constants.h"
+#include "base_constants.h"
 
 template <typename T>
 __global__ void fillUniversalVectorKernel(T* d_out, T value, size_t size) { for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) d_out[idx] = value; }

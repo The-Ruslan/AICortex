@@ -1,4 +1,3 @@
-//kernels.h
 #pragma once
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -881,14 +880,12 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 				  mamba_cols = mamba_d_state >> 5;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
+	const int block_oc_start = blockIdx.x << 5; 
 	const int block_ch_idx = (blockIdx.y * num_warps + warp_id) << 5;
 	const int ch = block_ch_idx + lane_id;
 	const int in_ch_idx = ch & (final_channels - 1);
-	const int oc_per_block = OutC / gridDim.x;
-	const int block_oc_start = blockIdx.x * oc_per_block;
-	const int block_oc_end = block_oc_start + oc_per_block;
-	__shared__ __half s_mem[mamba_d_inner];
-	float hr_l[mamba_cols], hi_l[mamba_cols], trA_re[mamba_cols], trA_im[mamba_cols], trB[mamba_cols], trDelta[mamba_cols], cached_raw_A_re[mamba_cols], cached_raw_A_im[mamba_cols], cached_W_C_re[mamba_cols], cached_W_C_im[mamba_cols];
+	__shared__ float s_mem[num_warps][33];
+	float hr_l[mamba_cols], hi_l[mamba_cols], trA_re[mamba_cols], trA_im[mamba_cols], trB[mamba_cols], trDelta[mamba_cols];
 	const int base_row_h = ch * (mamba_d_state << 1);
 	#pragma unroll
 	for (int i = 0; i < mamba_cols; ++i)
@@ -901,47 +898,47 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 		trB[i] = 0.0f;
 		trDelta[i] = 0.0f;
 	}
-	const int mimo_block_id = block_ch_idx / mamba_mimo_group_size;
-	const int8_t B_single_scale = weight_scales[(mamba_d_inner + mimo_block_id * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size) >> 5];
-	const int base_W_B = (mamba_d_inner >> 3) + mimo_block_id * (mamba_mimo_matrix_elements >> 3) + (lane_id << 2);
-	uint32_t B_row_packed[4];
-	#pragma unroll
-	for (int b = 0; b < 4; ++b) B_row_packed[b] = weights[base_W_B + b];
+	float cached_raw_A_re[mamba_cols], cached_raw_A_im[mamba_cols], cached_W_C_re[mamba_cols], cached_W_C_im[mamba_cols];
+	uint32_t raw_weights_ac[4];
+	int8_t raw_weight_scales_ac[4];
 	#pragma unroll
 	for (int c = 0; c < mamba_cols; ++c)
 	{
 		const int w_off = ch * mamba_d_state + lane_id + (c << 5);
 		const int off_a_r = off_A_re + w_off, off_a_i = off_A_im + w_off, off_c_r = off_W_C_re + w_off, off_c_i = off_W_C_im + w_off;
-		uint32_t raw_weights_ac[4];
-		int8_t raw_weight_scales_ac[4];
-		raw_weights_ac[0] = weights[off_a_r >> 3];
-		raw_weight_scales_ac[0] = weight_scales[off_a_r >> 5];
-		raw_weights_ac[1] = weights[off_a_i >> 3];
-		raw_weight_scales_ac[1] = weight_scales[off_a_i >> 5];
-		raw_weights_ac[2] = weights[off_c_r >> 3];
-		raw_weight_scales_ac[2] = weight_scales[off_c_r >> 5];
-		raw_weights_ac[3] = weights[off_c_i >> 3];
-		raw_weight_scales_ac[3] = weight_scales[off_c_i >> 5];
+		raw_weights_ac[0] = weights[off_a_r >> 3]; raw_weight_scales_ac[0] = weight_scales[off_a_r >> 5];
+		raw_weights_ac[1] = weights[off_a_i >> 3]; raw_weight_scales_ac[1] = weight_scales[off_a_i >> 5];
+		raw_weights_ac[2] = weights[off_c_r >> 3]; raw_weight_scales_ac[2] = weight_scales[off_c_r >> 5];
+		raw_weights_ac[3] = weights[off_c_i >> 3]; raw_weight_scales_ac[3] = weight_scales[off_c_i >> 5];
 		cached_raw_A_re[c] = dequantize_scalar(raw_weights_ac[0], off_a_r & 7, raw_weight_scales_ac[0]);
 		cached_raw_A_im[c] = dequantize_scalar(raw_weights_ac[1], off_a_i & 7, raw_weight_scales_ac[1]);
 		cached_W_C_re[c] = dequantize_scalar(raw_weights_ac[2], off_c_r & 7, raw_weight_scales_ac[2]);
 		cached_W_C_im[c] = dequantize_scalar(raw_weights_ac[3], off_c_i & 7, raw_weight_scales_ac[3]);
 	}
-	const float W_delta_l = dequantize_scalar(weights[ch >> 3], ch & 7, weight_scales[ch >> 5]);
-	const float x_local = dequantize_scalar(load_u32(input, 0, u32_stride_in, in_ch_idx >> 3), in_ch_idx & 7, input_scales[in_ch_idx >> 5]);
-	float x_chunk[4], B_x_chunk[4];
+	const uint32_t input_u32 = load_u32(input, 0, u32_stride_in, in_ch_idx >> 3);
+	const int8_t input_scale = input_scales[in_ch_idx >> 5];
+	const int mimo_block_id = block_ch_idx / mamba_mimo_group_size;
+	const int8_t B_single_scale = weight_scales[(mamba_d_inner + mimo_block_id * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size) >> 5];
+	uint32_t B_row_packed[4];
+	*reinterpret_cast<uint4*>(B_row_packed) = *reinterpret_cast<const uint4*>(&weights[(mamba_d_inner >> 3) + mimo_block_id * (mamba_mimo_matrix_elements >> 3) + (lane_id << 2)]);
+	const uint32_t weight_u32 = weights[ch >> 3];
+	const int8_t weight_scale = weight_scales[ch >> 5];
+	const float x_local = dequantize_scalar(input_u32, in_ch_idx & 7, input_scale);
+	float x_val_chunk[4], B_x_chunk[4] = {};
 	#pragma unroll
 	for (int window = 0; window < 32; window += 4) 
 	{
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) x_chunk[i] = __shfl_sync(0xFFFFFFFF, x_local, window + i);
+		for (int i = 0; i < 4; ++i) x_val_chunk[i] = __shfl_sync(0xFFFFFFFF, x_local, window + i);
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) B_x_chunk[i] = fmaf(dequantize_scalar(B_row_packed[(window + i) >> 3], (window + i) & 7, B_single_scale), x_chunk[i], B_x_chunk[i]);
+		for (int i = 0; i < 4; ++i) B_x_chunk[i] = fmaf(dequantize_scalar(B_row_packed[(window + i) >> 3], (window + i) & 7, B_single_scale), x_val_chunk[i], B_x_chunk[i]);
 	}
 	const float B_x_mimo = B_x_chunk[0] + B_x_chunk[1] + B_x_chunk[2] + B_x_chunk[3];
-	const float xlwdl = x_local * W_delta_l, dt = xlwdl + __logf(1.0f + __expf(-fabsf(xlwdl))), dt_half_neg = -dt * 0.5f;
+	const float xlwdl = x_local * dequantize_scalar(weight_u32, ch & 7, weight_scale);
+	const float dt = xlwdl + __logf(1.0f + __expf(-fabsf(xlwdl))), dt_half_neg = -dt * 0.5f;
 	const int off_D_ch = off_D + ch;
-	const float D_skip_l = dequantize_scalar(weights[off_D_ch >> 3], off_D_ch & 7, weight_scales[off_D_ch >> 5]);
+	const uint32_t weight_u32_smem = weights[off_D_ch >> 3];
+	const int8_t weight_scale_smem = weight_scales[off_D_ch >> 5];
 	float y_acc = 0.0f;
 	#pragma unroll
 	for (int c = 0; c < mamba_cols; ++c)
@@ -963,50 +960,35 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 		trA_re[c] = fmaf(abr, trA_re[c], hr_old);
 		trA_im[c] = fmaf(abr, trA_im[c], hi_l[c]);
 		trB[c] = fmaf(abr, trB[c], dt * x_local);
-		trDelta[c] = fmaf(abr, trDelta[c], B_x_mimo * ire + hr_old * are * -0.5f);
+		trDelta[c] = fmaf(abr, trDelta[c], fmaf(B_x_mimo, ire, -hr_old * are * 0.5f));
 		y_acc = fmaf(hr_l[c], cached_W_C_re[c], fmaf(-hi_l[c], cached_W_C_im[c], y_acc));
 	}
-	s_mem[ch] = __float2half(fmaf(D_skip_l, x_local, y_acc));
+	s_mem[warp_id][lane_id] = fmaf(dequantize_scalar(weight_u32_smem, off_D_ch & 7, weight_scale_smem), x_local, y_acc);
 	__syncthreads();
-	for (int b_oc = block_oc_start; b_oc < block_oc_end; b_oc += num_warps)
+	const int oc = block_oc_start + (warp_id << 2) + (lane_id >> 3); 
+	float sum_out = 0.0f;
+	const int w_base = off_W_out + oc * mamba_d_inner;
+	for (int ic = (lane_id & 7) << 2; ic < mamba_d_inner; ic += 32)
 	{
-		const int oc = b_oc + warp_id;
-		float sum_out = 0.0f;
-		__half bias = h_zero();
-		if (oc < block_oc_end)
+		uint32_t w_raw[4];
+		int8_t ws_raw[4];
+		#pragma unroll
+		for (int i = 0; i < 4; i++)
 		{
-			bias = biases[oc];
-			const int w_base = off_W_out + oc * mamba_d_inner;
-			float local_s_arr[4] = {};
-			uint32_t w_raw[4];
-			int8_t ws_raw[4];
-			for (int ic = lane_id; ic < mamba_d_inner; ic += 128)
-			{
-				#pragma unroll
-				for (int i = 0; i < 4; i++)
-				{
-					const int idx = w_base + ic + (i << 5);
-					w_raw[i] = weights[idx >> 3];
-					ws_raw[i] = weight_scales[idx >> 5];
-				}
-				#pragma unroll
-				for (int i = 0; i < 4; i++)
-				{
-					const int idx_ic = ic + (i << 5);
-					local_s_arr[i] = fmaf(__half2float(s_mem[idx_ic]), dequantize_scalar(w_raw[i], (w_base + idx_ic) & 7, ws_raw[i]), local_s_arr[i]);
-				}
-			}
-			sum_out = local_s_arr[0] + local_s_arr[1] + local_s_arr[2] + local_s_arr[3];
+			const int idx = w_base + ic + i;
+			w_raw[i] = weights[idx >> 3];
+			ws_raw[i] = weight_scales[idx >> 5];
 		}
 		#pragma unroll
-		for (int offset = 16; offset > 0; offset >>= 1) sum_out += __shfl_down_sync(0xFFFFFFFF, sum_out, offset);
-		if (lane_id == 0 && oc < block_oc_end)
-		{
-			const float sum_out_b = sum_out + __half2float(bias);
-			output[oc] = static_cast<T>(sum_out_b * __frcp_rn(1.0f + __expf(-sum_out_b)));
-		}
+		for (int i = 0; i < 4; i++) sum_out = fmaf(s_mem[warp_id][(ic + i) & 31], dequantize_scalar(w_raw[i], (w_base + ic + i) & 7, ws_raw[i]), sum_out);
 	}
-	__syncthreads();
+	#pragma unroll
+	for (int offset = 4; offset > 0; offset >>= 1) sum_out += __shfl_sync(0xFFFFFFFF, sum_out, offset);
+	if ((lane_id & 7) == 0)
+	{
+		const float sum_out_b = sum_out + __half2float(biases[oc]);
+		output[oc] = static_cast<T>(sum_out_b * __frcp_rn(1.0f + __expf(-sum_out_b)));
+	}
 	if (blockIdx.x != 0) return;
 	const int base_h = ch * (mamba_d_state << 1), base_tr = ch * mamba_d_state;
 	#pragma unroll

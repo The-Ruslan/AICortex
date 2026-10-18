@@ -1,6 +1,6 @@
-//cs.cpp
+#pragma once
 #include "cs.h"
-#include "bc.h"
+#include "base_constants.h"
 #include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Foundation.h>

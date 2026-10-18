@@ -1,4 +1,4 @@
-//cs.cu
+#pragma once
 #include "kernels.h"
 #include <cuda_d3d11_interop.h>
 

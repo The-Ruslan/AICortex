@@ -1,4 +1,3 @@
-//main.cu
 #define NOMINMAX
 #include "cortex.h"
 

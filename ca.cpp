@@ -1,4 +1,4 @@
-//ca.cpp
+#pragma once
 #include "ca.h"
 #include <chrono>
 #include <thread>

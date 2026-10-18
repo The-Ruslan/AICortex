@@ -1,0 +1,111 @@
+#pragma once
+#include "conv_layer.h"
+
+class ConvBlock
+{
+private:
+	const int input_channels, output_channels, middle_channels, input_dimension, final_dimension;
+	int *pipo_db, *pipo_db_num_groups;
+	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
+	cudaStream_t stream_forward, stream_backward;
+	const float survival_prob_inv;
+	universal_vector<uint32_t> buffer_a, buffer_b;
+	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
+	universal_vector<type_gradients> grad_buffer_a, grad_buffer_b, grad_residual;
+public:
+	void saveToFile(std::string pathFile) const
+	{
+		conv_layers[0]->saveToFile((std::filesystem::path(pathFile) / "depthwise_layer.bin").string());
+		conv_layers[1]->saveToFile((std::filesystem::path(pathFile) / "conv_layer1.bin").string());
+		conv_layers[2]->saveToFile((std::filesystem::path(pathFile) / "conv_layer2.bin").string());
+		conv_layers[3]->saveToFile((std::filesystem::path(pathFile) / "residual_layer.bin").string());
+	}
+	void loadFromFile(std::string pathFile)
+	{
+		conv_layers[0]->loadFromFile((std::filesystem::path(pathFile) / "depthwise_layer.bin").string());
+		conv_layers[1]->loadFromFile((std::filesystem::path(pathFile) / "conv_layer1.bin").string());
+		conv_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "conv_layer2.bin").string());
+		conv_layers[3]->loadFromFile((std::filesystem::path(pathFile) / "residual_layer.bin").string());
+	}
+	ConvBlock(int in_channels, int mid_channels, int out_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
+			  int* total_size_grad_weights, int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups,
+			  int kernel_size_dw, float survival_probability, cudaStream_t stream_bwd, float learning_rate, float penalty,
+			  size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
+		input_channels(in_channels),
+		middle_channels(mid_channels),
+		output_channels(out_channels),
+		input_dimension(in_dimension),
+		final_dimension(out_dimension),
+		stream_forward(stream_fwd),
+		stream_backward(stream_bwd),
+		pipo_db(db_pipo),
+		pipo_db_num_groups(db_pipo_num_groups),
+		survival_prob_inv(1.0f / survival_probability)
+    {
+		const int local_pipo_db = middle_channels * final_dimension * final_dimension,
+				  local_pipo_db_num_groups = local_pipo_db >> 5,
+				  final_stride = input_dimension == final_dimension ? 1 : stride;
+		*pipo_db = *pipo_db < local_pipo_db ? local_pipo_db : *pipo_db;
+		*pipo_db_num_groups = *pipo_db_num_groups < local_pipo_db_num_groups ? local_pipo_db_num_groups : *pipo_db_num_groups;
+		conv_layers.reserve(4);
+		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, input_channels, kernel_size_dw, final_stride, input_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
+		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, middle_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
+		conv_layers.push_back(std::make_unique<ConvLayer>(middle_channels, output_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
+		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, output_channels, 1, final_stride, input_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count));
+	}
+	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, void**& meta_adapted_data, size_t*& meta_adapted_offsets, uint8_t*& dev_side_ptr_grad_buffer_a, uint8_t*& dev_side_ptr_grad_buffer_b, uint8_t*& dev_side_ptr_grad_residual, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales)
+	{
+		conv_layers[0]->initData(isLoaded, (std::filesystem::path(dir_path) / "depthwise_layer.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, meta_adapted_data, meta_adapted_offsets);
+		conv_layers[1]->initData(isLoaded, (std::filesystem::path(dir_path) / "conv_layer1.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, meta_adapted_data, meta_adapted_offsets);
+		conv_layers[2]->initData(isLoaded, (std::filesystem::path(dir_path) / "conv_layer2.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, meta_adapted_data, meta_adapted_offsets);
+		conv_layers[3]->initData(isLoaded, (std::filesystem::path(dir_path) / "residual_layer.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, meta_adapted_data, meta_adapted_offsets);
+		buffer_a.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_a), *pipo_db_num_groups << 2, MemoryType::Device);
+		buffer_a_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_a_scales), *pipo_db_num_groups, MemoryType::Device);
+		buffer_b.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_b), *pipo_db_num_groups << 2, MemoryType::Device);
+		buffer_b_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_b_scales), *pipo_db_num_groups, MemoryType::Device);
+		if (!is_in_inference)
+		{
+			grad_buffer_a.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_buffer_a.data())>*>(dev_side_ptr_grad_buffer_a), *pipo_db, MemoryType::Device);
+			grad_buffer_b.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_buffer_b.data())>*>(dev_side_ptr_grad_buffer_b), *pipo_db, MemoryType::Device);
+			grad_residual.resize(reinterpret_cast<std::remove_pointer_t<decltype(grad_residual.data())>*>(dev_side_ptr_grad_residual), *pipo_db, MemoryType::Device);
+		}
+	}
+    void forward(const uint32_t* input, const int8_t* input_scales, uint32_t* output, int8_t* output_scales, bool train_mode = true, bool is_survived = true)
+    {
+		conv_layers[0]->forward(input, input_scales, buffer_a, buffer_a_scales);
+		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b, buffer_b_scales);
+		conv_layers[2]->forward(buffer_b.data(), buffer_b_scales.data(), buffer_a, buffer_a_scales);
+		conv_layers[3]->forward(input, input_scales, buffer_b, buffer_b_scales);
+		dim3 blocks_grid(final_dimension, final_dimension);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && is_survived ? survival_prob_inv : 1.0f, train_mode && !is_survived);
+	}
+	void backward(universal_vector<type_gradients>& grad_input_output, const uint32_t* input, const int8_t* input_scales, bool is_survived = true)
+	{
+		conv_layers[0]->forward(input, input_scales, buffer_a, buffer_a_scales);
+		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b, buffer_b_scales);
+		dim3 blocks_grid(final_dimension, final_dimension);
+		checkCudaError(cudaStreamSynchronize(stream_forward));
+		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f);
+		if (is_survived)
+		{
+			conv_layers[2]->backward(grad_input_output, buffer_b.data(), buffer_b_scales.data(), grad_buffer_b);
+			conv_layers[1]->backward(grad_buffer_b, buffer_a.data(), buffer_a_scales.data(), grad_buffer_a);
+			conv_layers[0]->backward(grad_buffer_a, input, input_scales, grad_input_output);
+		}
+		conv_layers[3]->backward(grad_residual, input, input_scales, grad_buffer_b);
+		auto* __restrict__ raw_target = grad_input_output.data();
+		const auto* __restrict__ raw_a = grad_buffer_b.data();
+		constexpr int elements_per_uint4 = sizeof(uint4) / sizeof(type_gradients);
+		grad_input_output.for_each_n(input_channels * input_dimension * input_dimension / elements_per_uint4, [raw_target, raw_a] __device__ (size_t i) 
+		{
+			const size_t offset = i * elements_per_uint4;
+			type_gradients local_target[elements_per_uint4], local_a[elements_per_uint4];
+			uint4* target_ptr = reinterpret_cast<uint4*>(raw_target + offset);
+			*reinterpret_cast<uint4*>(local_target) = *target_ptr;
+			*reinterpret_cast<uint4*>(local_a) = *reinterpret_cast<const uint4*>(raw_a + offset);
+			#pragma unroll
+			for (int j = 0; j < elements_per_uint4; ++j) local_target[j] += local_a[j];
+			*target_ptr = *reinterpret_cast<uint4*>(local_target);
+		}, stream_backward);
+	}
+};
