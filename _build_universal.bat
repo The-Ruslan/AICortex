@@ -29,18 +29,19 @@ cd /d "%~dp0"
 
 set OUTPUT_EXE=Cortex.exe
 
-echo ==========================================================================
-echo Building an Autonomous AI Controller (C++17 / CUDA 13.0 / WinAPI / WinRT)
+echo ===============================================================================
+echo Building an Autonomous AI Controller (ASM / C++17 / CUDA 13.0 / WinAPI / WinRT)
 echo Architecture support: Turing, Ampere, Ada Lovelace, Hopper, Blackwell
-echo ==========================================================================
+echo ===============================================================================
 
 :choose_config
 echo.
 echo Select build configuration:
-echo 1. Release (Max speed, NO debug info, for users)
-echo 2. Debug   (Your original setup: Max speed + debug info/symbols)
+echo 1. Release (Max speed, NO debug symbols, for users)
+echo 2. Debug   (CPU debug, debug symbols)
+echo 3. Profile (Max speed + GPU lineinfo for Nsight Profiler)
 echo.
-set /p CONFIG_CHOICE="Enter your choice (1 or 2): "
+set /p CONFIG_CHOICE="Enter your choice (1, 2, 3): "
 
 if "%CONFIG_CHOICE%"=="1" (
     set "CONFIG_MODE=Release"
@@ -55,7 +56,15 @@ if "%CONFIG_CHOICE%"=="2" (
     set "NVCC_OPT_FLAGS=-g"
     set "MSVC_OPT_FLAGS=/Zi"
     set "LINKER_FLAGS=/DEBUG /DEBUGTYPE:pdata"
-    set "OMP_DLL_NAME=libomp140d.x86_64.dll"
+    set "OMP_DLL_NAME=libomp140.x86_64.dll"
+    goto msvc_init
+)
+if "%CONFIG_CHOICE%"=="3" (
+    set "CONFIG_MODE=Profile"
+    set "NVCC_OPT_FLAGS=-lineinfo"
+    set "MSVC_OPT_FLAGS=/Zi"
+    set "LINKER_FLAGS=/DEBUG:FASTLINK"
+    set "OMP_DLL_NAME=libomp140.x86_64.dll"
     goto msvc_init
 )
 
@@ -65,7 +74,7 @@ goto choose_config
 :msvc_init
 echo.
 echo [INFO] Selected Configuration: !CONFIG_MODE!
-echo ==========================================================================
+echo ===============================================================================
 
 where cl.exe >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -236,17 +245,17 @@ if "!DLL_FOUND!"=="0" (
     echo Please make sure to copy it manually to run the executable safely.
 )
 
-echo ==========================================================================
+echo ===============================================================================
 echo %OUTPUT_EXE% successfully compiled in !CONFIG_MODE! mode.
 echo Nice to meet you, carbon-based unit.
-echo ==========================================================================
+echo ===============================================================================
 pause
 exit /b 0
 
 :error
-echo ==========================================================================
+echo ===============================================================================
 echo Assembly of %OUTPUT_EXE% failed.
 echo Check the compiler/linker error log above.
-echo ==========================================================================
+echo ===============================================================================
 pause
 exit /b 1
