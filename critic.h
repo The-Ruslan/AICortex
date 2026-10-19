@@ -102,7 +102,10 @@ public:
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales)
 	{
-		LAUNCH_KERNEL(gapKernel<>, std::min(1, ((in_channels >> 5) + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_forward, input, input_scales, hidden_pool.data(), dimension_in * dimension_in, in_channels);
+		hidden_pool.fill(0, hidden_pool.size(), 0, stream_forward);
+		const int spatial_size = dimension_in * dimension_in;
+		dim3 grid(((in_channels >> 5) + gpu_block_threads - 1) / gpu_block_threads, (spatial_size + 15) >> 4);
+		LAUNCH_KERNEL(gapKernel<>, grid, gpu_block_threads, 0, stream_forward, input, input_scales, hidden_pool.data(), spatial_size, in_channels);
 		const int complex_out_channels = out_channels >> 1;
 		LAUNCH_KERNEL(criticFwd1Kernel<>, ((complex_out_channels << 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, hidden_pool.data(), weights1.data(), weights_lambda.data(), hidden_state.data(), trace_w1.data(), trace_lambda.data(), complex_out_channels, in_channels);
 		LAUNCH_KERNEL(criticFwd2Kernel<>, 1, complex_out_channels, 0, stream_forward, hidden_state.data(), weights2.data(), score_output.data(), complex_out_channels);
@@ -127,7 +130,7 @@ public:
 	}
 	void reset(cudaStream_t stream_lnk = 0) 
     {
-        hidden_state.fill(0, hidden_state.size(), 0, stream_lnk); 
+        hidden_state.fill(0, hidden_state.size(), 0, stream_lnk);
         trace_w1.fill(0, trace_w1.size(), 0.0f, stream_lnk);
         trace_lambda.fill(0, trace_lambda.size(), 0.0f, stream_lnk);
     }

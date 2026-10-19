@@ -1303,11 +1303,12 @@ __global__ void gapKernel(const uint32_t* __restrict__ input, const int8_t* __re
 	if (base_ch_idx >= InC) return;
 	const int groups_per_in = InC >> 5;
 	const int scale_group_idx = base_ch_idx >> 5;
-	float sum[32];
-	#pragma unroll
-	for (int c = 0; c < 32; ++c) sum[c] = 0.0f;
+	float sum[32] = {};
+	constexpr int elements_per_block = 16;
+	const int start_i = blockIdx.y * elements_per_block;
+	const int end_i = min(start_i + elements_per_block, spatial_size);
 	const uint4* __restrict__ input_v4 = reinterpret_cast<const uint4*>(input + (base_ch_idx >> 3));
-	for (int i = 0; i < spatial_size; ++i) 
+	for (int i = start_i; i < end_i; ++i) 
 	{
 		uint4 packed_v4 = input_v4[i * groups_per_in];
 		const auto& packed_words = reinterpret_cast<const uint32_t(&)[4]>(packed_v4);
@@ -1319,8 +1320,9 @@ __global__ void gapKernel(const uint32_t* __restrict__ input, const int8_t* __re
 			for (int e = 0; e < 8; ++e) sum[(w << 3) + e] += dequantize_scalar(packed_words[w], e, s_quant);
 		}
 	}
+	const float spatial_size_inv = __frcp_rn(spatial_size);
 	#pragma unroll
-	for (int c = 0; c < 32; ++c) pooled_features[base_ch_idx + c] = static_cast<T>(sum[c] / spatial_size);
+	for (int c = 0; c < 32; ++c) atomicAdd(&pooled_features[base_ch_idx + c], static_cast<T>(sum[c] * spatial_size_inv));
 }
 template <int dummy = 0>
 __global__ void criticFwd1Kernel(const __half* __restrict__ hidden_pool, const __half* __restrict__ weights1, const __half* __restrict__ weights_lambda, __half* __restrict__ hidden_state, float* __restrict__ trace_w1, float* __restrict__ trace_lambda, int out_channels, int in_channels)
