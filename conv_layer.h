@@ -40,7 +40,7 @@ public:
 		file.read(reinterpret_cast<char*>(biases_tmp.data()), out_channels * sizeof(__half));
 		file.close();
 		biases.copy(biases_tmp, 0, out_channels, 0, out_channels, 0);
-		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 		checkCudaError(cudaStreamSynchronize(0));
 	}
 	ConvLayer(int inChannels, int outChannels, int kernelSize, int str_ide, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
@@ -94,7 +94,7 @@ public:
 		else
 		{
 			generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / (in_channels + out_channels)), 0, 1234);
-			LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+			LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 			generateNormalRandoms(biases, out_channels, std::sqrtf(2.0f / out_channels), 0, 5678);
 		}
 	}
@@ -173,6 +173,6 @@ public:
 		};
 		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), learning_rate, f_penalty);
 		LAUNCH_KERNEL(updateParamsKernel<>, std::max(1, (out_channels + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, biases.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), learning_rate, 0.0f);
-		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight);
+		LAUNCH_KERNEL(quantizeKernel<>, std::max(1, (num_groups + gpu_block_threads - 1) / gpu_block_threads), gpu_block_threads, 0, stream_backward, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 	}
 };

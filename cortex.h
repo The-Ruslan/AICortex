@@ -351,9 +351,9 @@ private:
 		dim3 block(32, 32);
 		dim3 grid(img_resolution * img_resolution / block.x, input_channels_first / block.y);
 		LAUNCH_KERNEL(NCHWtoNHWCKernel<>, grid, block, 0, stream_forward.get(), raw_visaud_fwd.data(), raw_visaud_fwd.data(), img_resolution, input_channels_first);
-		LAUNCH_KERNEL(quantizeKernel<>, ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), raw_visaud_fwd.size());
+		LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(raw_visaud_fwd.data())>, true>), ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), raw_visaud_fwd.size(), 0);
 		for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), false, false);
-		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data());
+		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), false, 0);
 		action_ptr.fill(0, action_ptr.size(), 0, stream_forward.get());
 		LAUNCH_KERNEL(setActionsKernel<>, (mamba_block->get_output().size() + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), mamba_block->get_output().data(), action_ptr.data(), mamba_block->get_output().size());
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
@@ -374,10 +374,10 @@ private:
 		dim3 block(32, 32);
 		dim3 grid(img_resolution * img_resolution / block.x, input_channels_first / block.y);
 		LAUNCH_KERNEL(NCHWtoNHWCKernel<>, grid, block, 0, stream_forward.get(), raw_visaud_fwd.data(), raw_visaud_fwd.data(), img_resolution, input_channels_first);
-		LAUNCH_KERNEL(quantizeKernel<>, ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.blocks_data.data(), exp.blocks_data_scales.data(), raw_visaud_fwd.size());
+		LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(raw_visaud_fwd.data())>, true>), ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.blocks_data.data(), exp.blocks_data_scales.data(), raw_visaud_fwd.size(), 0);
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 	}
-	void performInferenceTrain(bool meta_forward = false)
+	void performInferenceTrain(bool meta_forward = false, int add_seed = 1234)
 	{
 		if (!meta_forward)
 		{
@@ -394,7 +394,7 @@ private:
 			dim3 block(32, 32);
 			dim3 grid(img_resolution * img_resolution / block.x, input_channels_first / block.y);
 			LAUNCH_KERNEL(NCHWtoNHWCKernel<>, grid, block, 0, stream_forward.get(), raw_visaud_fwd.data(), raw_visaud_fwd.data(), img_resolution, input_channels_first);
-			LAUNCH_KERNEL(quantizeKernel<>, ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), raw_visaud_fwd.size());
+			LAUNCH_KERNEL((quantizeKernel<std::remove_pointer_t<decltype(raw_visaud_fwd.data())>, true>), ((raw_visaud_fwd.size() >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward.get(), raw_visaud_fwd.data(), exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), raw_visaud_fwd.size(), 0);
 			exp.blocks_data.copy(exp.visaud_fwd, 0, exp.blocks_data.size(), 0, exp.visaud_fwd.size(), stream_forward.get());
 			exp.blocks_data_scales.copy(exp.visaud_fwd_scales, 0, exp.blocks_data_scales.size(), 0, exp.visaud_fwd_scales.size(), stream_forward.get());
 		}
@@ -411,7 +411,7 @@ private:
 			const bool final_block = i == conv_blocks.size() - 1;
 			conv_blocks[i]->forward(blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), final_block ? exp.visaud_fwd.data() : blocks_data.data() + (i + 1) * (blocks_data.size() / conv_blocks.size()), final_block ? exp.visaud_fwd_scales.data() : blocks_data_scales.data() + (i + 1) * (blocks_data_scales.size() / conv_blocks.size()), true, exp.stochasticDepth[i]);
 		}
-		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data());
+		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), true, add_seed);
 		/*
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
 		const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
@@ -428,11 +428,11 @@ private:
 		if (meta_forward) return;
 		executeActions();
 	}
-	void performForward(bool meta_forward = false)
+	void performForward(bool meta_forward = false, int add_seed = 1234)
 	{
 		if (work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE || work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE_ON_TRAIN) performInference();
 		else if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY) performInferenceCritic();
-		else performInferenceTrain(meta_forward);
+		else performInferenceTrain(meta_forward, add_seed);
 	}
 	void onTrainFinish(bool really_fully_finish = false)
 	{
@@ -478,7 +478,7 @@ private:
 				{
 					auto* shame_exp = shame_experiences[start_idx + idx];
 					exp(*shame_exp, stream_backward.get());
-					performForward(true);
+					performForward(true, epoch);
 					if (inner_step == 0) final_shame_score += shame_exp->shame_score;
 					if (inner_step == 4) shame_exp->shame_score = fminimum;
 				}
@@ -509,7 +509,7 @@ private:
 			{
 				auto* shame_exp = shame_experiences[start_idx + idx];
 				exp(*shame_exp, stream_backward.get());
-				performForward(true);
+				performForward(true, epoch);
 				final_shame_score += shame_exp->shame_score;
 				shame_exp->shame_score = fminimum;
 			}
@@ -777,7 +777,8 @@ public:
 			current_global_offset += meta_adapted_offsets[i];
 		}
 		onTrainFinish();
-		printGpuMem("MAIN_DEV: " + std::to_string(total_device_bytes_main / 1024.0f / 1024.0f) + " MB, SIDE_DEV: " + std::to_string(total_device_bytes_side / 1024.0f / 1024.0f) + " MB, MAIN_HOST: " + std::to_string(total_host_bytes_main / 1024.0f / 1024.0f) + " MB, SIDE_HOST: " + std::to_string(total_host_bytes_side / 1024.0f / 1024.0f) + " MB.");
+		//std::cout << "Total amount of weights and biases: " << total_learnable_data << std::endl;
+		std::cout << "[VRAM LOG] MAIN_DEV: " << total_device_bytes_main / 1024.0f / 1024.0f << " MB, SIDE_DEV: " << total_device_bytes_side / 1024.0f / 1024.0f << " MB, MAIN_HOST: " << total_host_bytes_main / 1024.0f / 1024.0f << " MB, SIDE_HOST: " << total_host_bytes_side / 1024.0f / 1024.0f << " MB." << std::endl;
 		printGpuMem("Tensors adjusted. Ready to work.");
 	}
 	void run()
@@ -811,7 +812,7 @@ public:
 				continue;
 			}
 			const auto frame_start = std::chrono::high_resolution_clock::now();
-			performForward();
+			performForward(false, epoch);
 			exp_is_dirty.store(true, std::memory_order_release);
 			const float score = isScored.load(std::memory_order_acquire);
 			if (score > fminimum)
