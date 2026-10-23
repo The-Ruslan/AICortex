@@ -267,18 +267,15 @@ __global__ void convPointwiseFwdKernel(const uint32_t* __restrict__ input, const
 	tensor_cores_m16n32k32(acc_arr, input, input_scales, weights, weight_scales, InC, groups_per_in, u32_stride_in, spatial_idx_in & ~15, outc_warp_base, lane_id >> 1, lane_id);
 	T bias_arr[4];
 	#pragma unroll
-	for (int i = 0; i < 4; ++i)
-	{
-		const int outc_curr = outc_warp_base + (i << 3) + lane_id;
-		bias_arr[i] = biases[outc_curr];
-	}
-	float local_block_sq_accumulator = 0.0f;
+	for (int i = 0; i < 4; ++i) bias_arr[i] = biases[outc_warp_base + (i << 3) + lane_id];
+	float local_block_sq_accumulator_arr[4];
 	#pragma unroll
 	for (int i = 0; i < 4; ++i)
 	{
 		const float acc = acc_arr[i] + static_cast<float>(bias_arr[i]);
-		local_block_sq_accumulator = fmaf(acc, acc, local_block_sq_accumulator);
+		local_block_sq_accumulator_arr[i] = acc * acc;
 	}
+	float local_block_sq_accumulator = local_block_sq_accumulator_arr[0] + local_block_sq_accumulator_arr[1] + local_block_sq_accumulator_arr[2] + local_block_sq_accumulator_arr[3];
 	#pragma unroll
 	for (int offset = 16; offset > 0; offset >>= 1) local_block_sq_accumulator += __shfl_xor_sync(0xFFFFFFFF, local_block_sq_accumulator, offset);
 	if (lane_id == 0) smem_warps[warp_id] = local_block_sq_accumulator;
@@ -473,6 +470,7 @@ __global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 	__shared__ float smem_in[dim_block_pw_bwd_gw_size][dim_block_pw_bwd_gw_size + 1], smem_gn_warps[dim_block_pw_bwd_gw_size], smem_gn_groups[gn_groups_per_block > 0 ? gn_groups_per_block : 1];
 	__shared__ T smem_grad_out[dim_block_pw_bwd_gw_size][dim_block_pw_bwd_gw_size + 1];
 	float sum[4] = {};
+	const T bias = biases[outc];
 	for (int p_base = 0; p_base < NHW_out; p_base += dim_block_pw_bwd_gw_size)
 	{
 		const int p_in = p_base + threadIdx.y;
@@ -506,7 +504,6 @@ __global__ void convPointwiseBwdGradWeightKernel(const uint32_t* __restrict__ in
 			curr_in_scale = next_in_scale;
 			curr_w_scale = next_w_scale;
 		}
-		const T bias = biases[outc];
 		const auto& w_val_ptr = reinterpret_cast<const uint32_t(&)[4]>(curr_w);
 		const auto& shared_in = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4);
 		int partial_sum = 0;
@@ -565,6 +562,7 @@ __global__ void convPointwiseBwdGradBiasKernel(const uint32_t* __restrict__ inpu
 	__shared__ float smem_warps[warps], smem_block_total;
 	const int warp_id = threadIdx.x >> 5;
 	float bias_grad_accumulator = 0.0f;
+	const T bias = biases[outc];
 	for (int p = 0; p < NHW_out; ++p)
 	{
 		const int spatial_idx_in = (p >> log2_dim_out) * stride * Dimension_in + (p & mask_dim_out) * stride;
@@ -594,7 +592,6 @@ __global__ void convPointwiseBwdGradBiasKernel(const uint32_t* __restrict__ inpu
 			curr_in_scale = next_in_scale;
 			curr_w_scale = next_w_scale;
 		}
-		const T bias = biases[outc];
 		const auto& w_val_ptr = reinterpret_cast<const uint32_t(&)[4]>(curr_w);
 		const auto& shared_in = reinterpret_cast<const uint32_t(&)[4]>(curr_in_v4);
 		int partial_sum = 0;
@@ -785,17 +782,18 @@ __global__ void convDepthwiseBwdGradBiasKernel(const T* __restrict__ grad_output
 	const int lane_id = threadIdx.x & 31;
 	const int group_idx = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
 	const int outc = (group_idx << 5) + lane_id;
-	float sum_arr[4] = {}, curr_go[4], next_go[4];
+	float sum_arr[4] = {}, curr_go[4];
 	#pragma unroll
 	for (int p = 0; p < 4; ++p) curr_go[p] = p < NHW ? static_cast<float>(grad_output[p * InC + outc]) : 0.0f;
+	T next_go[4];
 	for (int p = 4; p < NHW; p += 4)
 	{
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) next_go[i] = static_cast<float>(grad_output[(p + i) * InC + outc]);
+		for (int i = 0; i < 4; ++i) next_go[i] = grad_output[(p + i) * InC + outc];
 		#pragma unroll
 		for (int i = 0; i < 4; ++i) sum_arr[i] += curr_go[i];
 		#pragma unroll
-		for (int i = 0; i < 4; ++i) curr_go[i] = next_go[i];
+		for (int i = 0; i < 4; ++i) curr_go[i] = static_cast<float>(next_go[i]);
 	}
 	#pragma unroll
 	for (int i = 0; i < 4; ++i) sum_arr[i] += curr_go[i];
@@ -803,8 +801,8 @@ __global__ void convDepthwiseBwdGradBiasKernel(const T* __restrict__ grad_output
 	const float neighbor_sum = __shfl_xor_sync(0xFFFFFFFF, sum, 1);
 	if ((lane_id & 1) == 0)
 	{
-		grad_biases[outc << 1] = static_cast<T>(sum);
-		grad_biases[(outc << 1) + 1] = static_cast<T>(neighbor_sum);
+		grad_biases[outc] = static_cast<T>(sum);
+		grad_biases[outc + 1] = static_cast<T>(neighbor_sum);
 	}
 }
 template <int threads_per_block = gpu_block_threads>
@@ -967,7 +965,7 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 	const int off_D_ch = off_D + ch;
 	const uint32_t weight_u32_smem = weights[off_D_ch >> 3];
 	const int8_t weight_scale_smem = weight_scales[off_D_ch >> 5];
-	float y_acc = 0.0f;
+	float y_acc_arr[mamba_cols];
 	#pragma unroll
 	for (int c = 0; c < mamba_cols; ++c)
 	{
@@ -989,8 +987,11 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdKernel(const 
 		trA_im[c] = fmaf(abr, trA_im[c], hi_l[c]);
 		trB[c] = fmaf(abr, trB[c], dt * x_local);
 		trDelta[c] = fmaf(abr, trDelta[c], fmaf(B_x_mimo, ire, -hr_old * are * 0.5f));
-		y_acc = fmaf(hr_l[c], cached_W_C_re[c], fmaf(-hi_l[c], cached_W_C_im[c], y_acc));
+		y_acc_arr[c] = fmaf(hr_l[c], cached_W_C_re[c], -hi_l[c] * cached_W_C_im[c]);
 	}
+	float y_acc = 0.0f;
+	#pragma unroll
+	for (int c = 0; c < mamba_cols; ++c) y_acc += y_acc_arr[c];
 	s_mem[warp_id][lane_id] = fmaf(dequantize_scalar(weight_u32_smem, off_D_ch & 7, weight_scale_smem), x_local, y_acc);
 	__syncthreads();
 	const int oc = block_oc_start + (warp_id << 2) + (lane_id >> 3); 
