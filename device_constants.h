@@ -40,7 +40,7 @@ using unique_stream = std::unique_ptr<std::remove_pointer_t<cudaStream_t>, CudaS
 
 inline size_t align16(size_t bytes) { return (bytes + 15) & ~15; };
 
-using type_gradients = float;
+using type_learnable_parameters = float;
 
 template <typename T>
 struct SquareOp
