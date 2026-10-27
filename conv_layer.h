@@ -115,9 +115,6 @@ public:
 				case 11: LAUNCH_CONV_FWD_KERNEL(11); break;
 				case 13: LAUNCH_CONV_FWD_KERNEL(13); break;
 				case 15: LAUNCH_CONV_FWD_KERNEL(15); break;
-				case 17: LAUNCH_CONV_FWD_KERNEL(17); break;
-				case 19: LAUNCH_CONV_FWD_KERNEL(19); break;
-				case 21: LAUNCH_CONV_FWD_KERNEL(21); break;
 				default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 			}
 			#undef LAUNCH_CONV_FWD_KERNEL
@@ -149,9 +146,6 @@ public:
 				case 11: LAUNCH_CONV_BWD_KERNEL(11); break;
 				case 13: LAUNCH_CONV_BWD_KERNEL(13); break;
 				case 15: LAUNCH_CONV_BWD_KERNEL(15); break;
-				case 17: LAUNCH_CONV_BWD_KERNEL(17); break;
-				case 19: LAUNCH_CONV_BWD_KERNEL(19); break;
-				case 21: LAUNCH_CONV_BWD_KERNEL(21); break;
 				default: throw std::runtime_error("Unsupported kernel size: " + kernel_size); break;
 			}
 			#undef LAUNCH_CONV_BWD_KERNEL
