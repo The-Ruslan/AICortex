@@ -25,12 +25,12 @@ public:
 			return E_BackwardStrategy::STANDARD;
 		}
 		const float diff = fabsf(current_norm - ema_norm);
-		constexpr float alpha = 0.01f, relative_tolerance = 0.01f;
+		constexpr float alpha = 0.05f, relative_tolerance = 0.01f;
 		ema_norm = fmaf(alpha, current_norm - ema_norm, ema_norm);
 		ema_delta = fmaf(alpha, diff - ema_delta, ema_delta);
 		if (!is_meta_step) counter++;
 		const bool is_plateau = ema_delta < relative_tolerance * ema_norm;
-		if ((!is_meta_step && counter > 500 && is_plateau) || (is_meta_step && is_plateau))
+		if ((!is_meta_step && counter > 50 && is_plateau) || (is_meta_step && is_plateau))
 		{
 			if (meta_strike_counter >= 3) return E_BackwardStrategy::CONVERGED;
 			counter = 0;
