@@ -671,7 +671,7 @@ public:
 			const int middle_channels = (std::lround(output_channels * (middle_channels_factor - (middle_channels_factor >> 1) * progress_out)) + 31) & ~31;
 			conv_blocks.push_back(std::make_unique<ConvBlock>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
 															  stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
-															  &pipo_db, &pipo_db_num_groups, std::min(3 + (i & ~1), 11),
+															  &pipo_db, &pipo_db_num_groups, std::min(std::min(3 + (i & ~1), 11), std::max(3, dimension_old | 1)),
 															  get_gen_value(1.0f - i * 0.5f * inv_depth), stream_backward.get(),
 															  learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
 															  &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
