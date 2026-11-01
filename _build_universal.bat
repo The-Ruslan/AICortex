@@ -67,7 +67,6 @@ if "%CONFIG_CHOICE%"=="3" (
     set "OMP_DLL_NAME=libomp140.x86_64.dll"
     goto msvc_init
 )
-
 echo [ERROR] Invalid choice. Please try again.
 goto choose_config
 
