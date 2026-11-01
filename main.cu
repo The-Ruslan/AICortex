@@ -1,11 +1,48 @@
 #define NOMINMAX
+#include <device_launch_parameters.h>
 #include "cortex.h"
+
+struct GpuFrequencyGuard
+{
+	std::string saved_freq = "";
+	void resetFrequency()
+	{
+		std::cout << "[SYSTEM LOG] Resetting GPU frequencies to default." << std::endl;
+		std::system("nvidia-smi -rgc");
+	}
+	void applyFrequency(const std::string& freq)
+	{
+		if (!freq.empty()) 
+		{
+			std::string command = "nvidia-smi -lgc " + freq + "," + freq;
+			std::cout << "[SYSTEM LOG] Applying: " << command << std::endl;
+			int res = std::system(command.c_str());
+			if (res != 0) std::cout << "[WARNING] Failed to set frequency. Make sure to run as Administrator." << std::endl;
+		} 
+		else resetFrequency();
+	}
+	void lockFrequency()
+	{
+		std::cout << "[MENU] Enter GPU lock frequency (e.g., 1200) or press Enter to skip >> ";
+		saved_freq = "";
+		std::getline(std::cin, saved_freq);
+		applyFrequency(saved_freq);
+	}
+	static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
+	{
+		if (ctrlType == CTRL_CLOSE_EVENT || ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) std::system("nvidia-smi -rgc");
+		return false;
+	}
+	~GpuFrequencyGuard() { std::system("nvidia-smi -rgc"); }
+};
+extern GpuFrequencyGuard gpuGuard;
 
 bool msgOnPause(Cortex* cortex, HWND& hwnd, std::atomic<float>& isScored, std::mutex& mtx_running, bool& is_running, std::condition_variable& cv_running)
 {
 	std::cout << "\n================================================================\n";
 	std::cout << "                     AI HAS BEEN SUSPENDED!";
 	std::cout << "\n================================================================\n";
+	gpuGuard.resetFrequency();
 	std::cout << " Press [0] to pause switching.\n";
 	std::cout << " Press [1] to exit with no data.\n";
 	std::cout << " Press [2] to exit with data.\n";
@@ -53,6 +90,11 @@ bool msgOnPause(Cortex* cortex, HWND& hwnd, std::atomic<float>& isScored, std::m
 				std::cout << "[SYSTEM LOG] Invalid input. Try again." << std::endl;
 				break;
 		}
+	}
+	if (!gpuGuard.saved_freq.empty())
+	{
+		std::cout << "[SYSTEM LOG] Restoring GPU lock frequency..." << std::endl;
+		gpuGuard.applyFrequency(gpuGuard.saved_freq);
 	}
 	{
 		std::unique_lock<std::mutex> lock(mtx_running);
@@ -245,6 +287,8 @@ inline unsigned short find_by_key(const std::string& str, const std::string& fin
 	return it->code;
 }
 
+GpuFrequencyGuard gpuGuard;
+
 int main()
 {
 	checkCudaError(cudaSetDevice(0));
@@ -255,6 +299,8 @@ int main()
     std::cout << "\n================================================================\n";
     std::cout << "  LOCAL AI CONTROLLER\n";
     std::cout << "================================================================\n\n";
+	SetConsoleCtrlHandler(GpuFrequencyGuard::ConsoleCtrlHandler, true);
+	gpuGuard.lockFrequency();
     std::cout << "[MENU] Enter process name >> ";
 	std::string process_name;
     std::getline(std::cin, process_name);

@@ -14,8 +14,7 @@ enum class E_Workmode : uint8_t
 using action_type = uint64_t;
 inline constexpr int gpu_block_threads = 256,
 					 img_resolution = 256,
-					 input_channels_first = 32,
-					 base_channels = 64,
+					 base_channels = 32,
 					 final_channels = 2048,
 					 middle_channels_factor = 4,
 					 mamba_layers_amount = 16,

@@ -149,7 +149,6 @@ del *.obj >nul 2>nul
 
 echo [INFO] Compiling CUDA files via NVCC...
 for %%F in (main cs ca) do %NVCC% -c %%F.cu -o %%F_cuda.obj ^
-	-rdc=true ^
 	--ptxas-options=-v ^
 	-std=c++17 ^
 	-O3 ^
@@ -192,19 +191,6 @@ cl.exe /c cs.cpp ca.cpp ^
 	/Ot ^
 	/permissive- ^
 	!MSVC_OPT_FLAGS!
-if %ERRORLEVEL% NEQ 0 goto error
-
-echo [INFO] Performing CUDA Device Linking...
-%NVCC% -dlink ^
-	main_cuda.obj cs_cuda.obj ca_cuda.obj ^
-	-o cuda_dlink.obj ^
-	-gencode arch=compute_75,code=sm_75 ^
-	-gencode arch=compute_80,code=sm_80 ^
-	-gencode arch=compute_86,code=sm_86 ^
-	-gencode arch=compute_89,code=sm_89 ^
-	-gencode arch=compute_90,code=sm_90 ^
-	-gencode arch=compute_100,code=sm_100 ^
-	--cudart=static || goto error
 if %ERRORLEVEL% NEQ 0 goto error
 
 echo [INFO] Linking everything together into %OUTPUT_EXE% via MSVC...
