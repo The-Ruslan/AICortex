@@ -154,7 +154,7 @@ public:
 			dim3 grid_b((in_channels + gpu_block_threads - 1) / gpu_block_threads);
 			LAUNCH_KERNEL(convDepthwiseBwdGradBiasKernel<>, grid_b, gpu_block_threads, 0, stream_backward, grad_output, grad_biases.data(), in_channels, dimension_out * dimension_out);
 			dim3 grid_w(grid_b.x);
-			dim3 grid_i(grid_b.x, dimension_in, dimension_in);
+			dim3 grid_i(dimension_in * dimension_in, grid_b.x);
 			#define LAUNCH_CONV_BWD_KERNEL(K_SIZE) \
 				LAUNCH_KERNEL(convDepthwiseBwdGradWeightKernel<K_SIZE>, grid_w, gpu_block_threads, 0, stream_backward, input, input_scales, grad_output, grad_weights.data(), in_channels, dimension_in, dimension_out, stride); \
 				LAUNCH_KERNEL(convDepthwiseBwdGradInputKernel<K_SIZE>, grid_i, gpu_block_threads, 0, stream_backward, grad_output, master_weights.data(), grad_input, in_channels, dimension_in, dimension_out, stride)
@@ -171,7 +171,7 @@ public:
 		{
 			dim3 grid_b((out_channels + gpu_block_threads - 1) / gpu_block_threads);
 			dim3 grid_w((out_channels + gpu_block_threads - 1) / gpu_block_threads, in_channels);
-			dim3 grid_i((out_channels + gpu_block_threads - 1) / gpu_block_threads, dimension_out, dimension_out);
+			dim3 grid_i(dimension_out * dimension_out, (out_channels + gpu_block_threads - 1) / gpu_block_threads);
 			#define LAUNCH_CONV_DENSE_BWD_KERNEL(ACTIVATION, K_SIZE) \
 				LAUNCH_KERNEL((convDenseBwdGradBiasKernel<ACTIVATION, K_SIZE>), grid_b, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, grad_biases.data(), in_channels, out_channels, dimension_in, dimension_out, stride); \
 				LAUNCH_KERNEL((convDenseBwdGradWeightKernel<ACTIVATION, K_SIZE>), grid_w, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, grad_weights.data(), in_channels, out_channels, dimension_in, dimension_out, stride); \
@@ -205,7 +205,7 @@ public:
 			dim3 grid_w(out_channels / dim_block_pw_bwd_gw_size, in_channels / dim_block_pw_bwd_gw_size);
 			if (disable_activation) LAUNCH_KERNEL(convPointwiseBwdGradWeightKernel<true>, grid_w, block_w, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, grad_weights.data(), in_channels, out_channels, dimension_out * dimension_out);
 			else LAUNCH_KERNEL(convPointwiseBwdGradWeightKernel<false>, grid_w, block_w, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, grad_weights.data(), in_channels, out_channels, dimension_out * dimension_out);
-			dim3 grid_in(grid_b.x, dimension_out, dimension_out);
+			dim3 grid_in(dimension_out * dimension_out, grid_b.x);
 			if (disable_activation) LAUNCH_KERNEL(convPointwiseBwdGradInputKernel<true>, grid_in, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, master_weights.data(), grad_input, in_channels, out_channels);
 			else LAUNCH_KERNEL(convPointwiseBwdGradInputKernel<false>, grid_in, gpu_block_threads, 0, stream_backward, input, input_scales, weights.data(), weight_scales.data(), biases.data(), grad_output, master_weights.data(), grad_input, in_channels, out_channels);
 		}

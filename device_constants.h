@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <memory>
-#include <cassert>
 
 #ifdef DEBUG
 	#define LAUNCH_KERNEL(kernel, blocks, threads, shared_mem_size, stream, ...) \
