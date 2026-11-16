@@ -163,9 +163,11 @@ public:
 	}
 	universal_vector() = default;
 	universal_vector(size_t new_size, MemoryType mem_type = MemoryType::Device) { resize(new_size, mem_type); }
-	universal_vector(size_t new_size, T value, MemoryType mem_type = MemoryType::Device) { resize(new_size, value, mem_type); }
+	template <typename U>
+	universal_vector(size_t new_size, U value, MemoryType mem_type = MemoryType::Device) { resize(new_size, value, mem_type); }
 	universal_vector(T* external_ptr, size_t new_size, MemoryType mem_type) { resize(external_ptr, new_size, mem_type); }
-	universal_vector(T* external_ptr, size_t new_size, T value, MemoryType mem_type) { resize(external_ptr, new_size, value, mem_type); }
+	template <typename U>
+	universal_vector(T* external_ptr, size_t new_size, U value, MemoryType mem_type) { resize(external_ptr, new_size, value, mem_type); }
 	~universal_vector() { clear(); }
 	universal_vector(const universal_vector& other)
 	{

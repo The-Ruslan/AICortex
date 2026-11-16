@@ -98,8 +98,8 @@ public:
 		if (isLoaded) loadFromFile(dir_path);
 		else
 		{
-			generateNormalRandoms(weights1, real_size_weight, std::sqrtf(2.0f / in_channels), 0, 1234);
-			generateNormalRandoms(weights2, out_channels, std::sqrtf(1.0f / out_channels), 0, 5678);
+			generateNormalRandoms(weights1, real_size_weight, std::sqrtf(2.0f / in_channels), 0, real_size_weight);
+			generateNormalRandoms(weights2, out_channels, std::sqrtf(1.0f / out_channels), 0, out_channels);
 			weights_lambda.for_each_n(real_size_weight, LambdaWeightsOP<type_learnable_parameters>{weights_lambda.data(), real_size_weight}, 0);
 		}
 	}
@@ -134,7 +134,7 @@ public:
 	void reset(cudaStream_t stream_lnk = 0) 
     {
         hidden_state.fill(0, hidden_state.size(), 0, stream_lnk);
-        trace_w1.fill(0, trace_w1.size(), 0.0f, stream_lnk);
-        trace_lambda.fill(0, trace_lambda.size(), 0.0f, stream_lnk);
+        trace_w1.fill(0, trace_w1.size(), 0, stream_lnk);
+        trace_lambda.fill(0, trace_lambda.size(), 0, stream_lnk);
     }
 };

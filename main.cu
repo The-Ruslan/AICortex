@@ -23,7 +23,7 @@ struct GpuFrequencyGuard
 	}
 	void lockFrequency()
 	{
-		std::cout << "[MENU] Enter GPU lock frequency (e.g., 1200) or press Enter to skip >> ";
+		std::cout << "[MENU] Enter GPU lock frequency (e.g., 1500) or press Enter to skip >> ";
 		saved_freq = "";
 		std::getline(std::cin, saved_freq);
 		applyFrequency(saved_freq);

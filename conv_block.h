@@ -6,9 +6,9 @@ class ConvBlock
 private:
 	const int input_channels, output_channels, middle_channels, input_dimension, final_dimension;
 	int *pipo_db, *pipo_db_num_groups;
-	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
 	cudaStream_t stream_forward, stream_backward;
-	const float survival_prob_inv;
+	const float survival_prob_inv, residual_factor;
+	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
 	universal_vector<uint32_t> buffer_a, buffer_b;
 	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
 	universal_vector<type_learnable_parameters> grad_buffer_a, grad_buffer_b, grad_residual;
@@ -29,7 +29,7 @@ public:
 	}
 	ConvBlock(int in_channels, int mid_channels, int out_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
 			  int* total_size_grad_weights, int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups,
-			  int kernel_size_dw, float survival_probability, cudaStream_t stream_bwd, float learning_rate, float penalty,
+			  int kernel_size_dw, float survival_probability, float res_factor, cudaStream_t stream_bwd, float learning_rate, float penalty,
 			  size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
 		input_channels(in_channels),
 		middle_channels(mid_channels),
@@ -40,7 +40,8 @@ public:
 		stream_backward(stream_bwd),
 		pipo_db(db_pipo),
 		pipo_db_num_groups(db_pipo_num_groups),
-		survival_prob_inv(1.0f / survival_probability)
+		survival_prob_inv(1.0f / survival_probability),
+		residual_factor(res_factor)
     {
 		const int local_pipo_db = middle_channels * final_dimension * final_dimension,
 				  local_pipo_db_num_groups = local_pipo_db >> 5,
@@ -77,7 +78,7 @@ public:
 		conv_layers[2]->forward(buffer_b.data(), buffer_b_scales.data(), buffer_a.data(), buffer_a_scales.data());
 		conv_layers[3]->forward(input, input_scales, buffer_b.data(), buffer_b_scales.data());
 		dim3 blocks_grid(final_dimension, final_dimension);
-		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && is_survived ? survival_prob_inv : 1.0f, train_mode && !is_survived);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && is_survived ? survival_prob_inv : 1.0f, train_mode && !is_survived, residual_factor);
 	}
 	void backward(universal_vector<type_learnable_parameters>& grad_input_output, const uint32_t* input, const int8_t* input_scales, bool is_survived = true)
 	{
@@ -85,7 +86,7 @@ public:
 		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data());
 		dim3 blocks_grid(final_dimension, final_dimension);
 		checkCudaError(cudaStreamSynchronize(stream_forward));
-		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f);
+		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f, residual_factor);
 		if (is_survived)
 		{
 			conv_layers[2]->backward(grad_input_output.data(), buffer_b.data(), buffer_b_scales.data(), grad_buffer_b.data());

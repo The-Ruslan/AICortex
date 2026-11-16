@@ -94,7 +94,7 @@ public:
 			float offset = 0.0f;
 			if (is_dw) offset = std::sqrtf(1.0f / (kernel_size * kernel_size));
 			else offset = std::sqrtf(2.0f / (in_channels + (disable_activation ? out_channels : 0)));
-			generateNormalRandoms(master_weights, real_size_weight, offset, 0, 1234);
+			generateNormalRandoms(master_weights, real_size_weight, offset, 0, real_size_weight);
 			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 			biases.fill(0, out_channels, 0, 0);
 		}

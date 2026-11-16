@@ -288,6 +288,7 @@ private:
 			cv_exp.wait(lock, [this] { return !exp_add || isEliminating.load(std::memory_order_acquire); });
 			if (isEliminating.load(std::memory_order_acquire)) return;
 		}
+		raw_visaud_fwd.fill(0, raw_visaud_fwd.size(), 0, stream_forward.get());
 		if (audioCapture) audioCapture->getAudioBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 		screenCapture->getScreenBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 		dim3 grid((img_resolution + 31) >> 5, img_resolution, base_channels >> 5);
@@ -310,6 +311,7 @@ private:
 			cv_exp.wait(lock, [this] { return !exp_add || isEliminating.load(std::memory_order_acquire); });
 			if (isEliminating.load(std::memory_order_acquire)) return;
 		}
+		raw_visaud_fwd.fill(0, raw_visaud_fwd.size(), 0, stream_forward.get());
 		if (audioCapture) audioCapture->getAudioBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 		screenCapture->getScreenBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 		dim3 grid((img_resolution + 31) >> 5, img_resolution, base_channels >> 5);
@@ -328,6 +330,7 @@ private:
 				cv_exp.wait(lock, [this] { return !exp_add || isEliminating.load(std::memory_order_acquire); });
 				if (isEliminating.load(std::memory_order_acquire)) return;
 			}
+			raw_visaud_fwd.fill(0, raw_visaud_fwd.size(), 0, stream_forward.get());
 			if (audioCapture) audioCapture->getAudioBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 			screenCapture->getScreenBufferCurrent(static_cast<void*>(&raw_visaud_fwd));
 			dim3 grid((img_resolution + 31) >> 5, img_resolution, base_channels >> 5);
@@ -629,7 +632,7 @@ public:
 			conv_blocks.push_back(std::make_unique<ConvBlock>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
 															  stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
 															  &pipo_db, &pipo_db_num_groups, std::min(7, std::max(3, dimension_old | 1)),
-															  get_gen_value(1.0f - i * 0.5f * inv_depth), stream_backward.get(),
+															  get_gen_value(1.0f - i * 0.5f * inv_depth), std::max(0.1f, 1.0f - i * inv_depth), stream_backward.get(),
 															  learning_rate, penalty_first - i * step_val, &total_device_bytes_main,
 															  &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
 			dimension_old = dimension;
@@ -640,7 +643,7 @@ public:
 		const bool is_in_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE || work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE_ON_TRAIN;
 		const bool is_in_inference_on_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE;
 		const bool is_in_inference_on_critic_only = work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY;
-		mamba_block = std::make_unique<MambaBlock>(final_channels, final_output_channels_padded, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
+		mamba_block = std::make_unique<MambaBlock>(final_channels, final_output_channels_padded, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, 1.0f, 1.0f, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count);
 		if (!is_in_inference && !is_in_inference_on_critic_only)
 		{
 			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total);
