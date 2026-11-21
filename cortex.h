@@ -229,7 +229,7 @@ private:
 				{
 					critic->forward(exp.blocks_data.data(), exp.blocks_data_scales.data());
 					const float triggered_score = isScored.load(std::memory_order_acquire);
-					const float real_score = triggered_score > fminimum ? triggered_score : critic->get_score_output();
+					const float real_score = triggered_score > fminimum ? triggered_score : critic->get_score_output(0);
 					if (has_last_score && hall_of_shame) hall_of_shame->addEntry(exp, mamba_block->get_output(), last_score, real_score, stream_exp.get());
 					else has_last_score = true;
 					exp_add = false;
@@ -348,15 +348,6 @@ private:
 			const bool final_block = i == conv_blocks.size() - 1;
 			conv_blocks[i]->forward(blocks_data.data() + i * (blocks_data.size() / conv_blocks.size()), blocks_data_scales.data() + i * (blocks_data_scales.size() / conv_blocks.size()), final_block ? exp.visaud_fwd.data() : blocks_data.data() + (i + 1) * (blocks_data.size() / conv_blocks.size()), final_block ? exp.visaud_fwd_scales.data() : blocks_data_scales.data() + (i + 1) * (blocks_data_scales.size() / conv_blocks.size()), true, exp.stochasticDepth[i]);
 		}
-		/*
-		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
-		const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
-		std::cout << "[SYSTEM LOG] Run pass has finished for " << frame_end.count() << " ms." << std::endl;
-		*/
-		/*
-		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
-		const auto frame_start = std::chrono::high_resolution_clock::now();
-		*/
 		mamba_block->forward(exp.visaud_fwd.data(), exp.visaud_fwd_scales.data(), true, add_seed);
 		/*
 		checkCudaError(cudaStreamSynchronize(stream_forward.get()));
@@ -477,10 +468,10 @@ private:
 		}
 		std::cout << "[SYSTEM LOG] Starting new backward epoch..." << std::endl;
 		const auto frame_start = std::chrono::high_resolution_clock::now();
-		if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY) critic->backward(score);
+		if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_CRITIC_ONLY) critic->backward(&score, exp.blocks_data.data(), exp.blocks_data_scales.data(), grad_input);
 		else
 		{
-			if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER) critic->backward(score);
+			if (work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER) critic->backward(&score, exp.blocks_data.data(), exp.blocks_data_scales.data(), grad_input);
 			if (next_backward_strategy == E_BackwardStrategy::META)
 			{
 				std::cout << "[SYSTEM LOG] Executing meta algorythm for adaptation..." << std::endl;
@@ -649,7 +640,7 @@ public:
 			hall_of_shame = std::make_unique<HallOfShame>(exp_buffer_size_total);
 			convergence_controller = std::make_unique<ConvergenceController>();
 		}
-		if (!is_in_inference_on_inference) critic = std::make_unique<Critic>(base_channels, base_channels << 3, img_resolution, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_side);
+		if (!is_in_inference_on_inference) critic = std::make_unique<Critic>(base_channels, 1, img_resolution, stream_exp.get(), &total_size_grad_weights, &total_size_grad_biases, &pipo_db, &pipo_db_num_groups, stream_backward.get(), learning_rate, penalty_val, &total_device_bytes_side, &total_host_bytes_side);
 		screenCapture = std::make_unique<CaptureScreen>(work_mode, isEliminating, is_running, mtx_running, cv_running, &total_device_bytes_main);
 		audioCapture = std::make_unique<CaptureAudio>(isEliminating, is_running, mtx_running, cv_running, &total_device_bytes_main);
 		constexpr size_t blocks_data_size = (img_resolution * img_resolution * base_channels) >> 5;
@@ -709,7 +700,7 @@ public:
 		host_main_ptr += w_bytes;
 		action_prevs.resize(reinterpret_cast<action_type*>(host_main_ptr), action_ptr.size(), 0, MemoryType::PinnedHost);
 		host_main_ptr += w_bytes;
-		if (critic) critic->initData(isLoaded, (std::filesystem::path(dir_path) / "critic.bin").string(), dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, total_size_grad_weights, total_size_grad_biases);
+		if (critic) critic->initData(isLoaded, (std::filesystem::path(dir_path) / "critic.bin").string(), dev_side_ptr, host_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, total_size_grad_weights, total_size_grad_biases, dev_main_ptr_buffer_a, dev_main_ptr_buffer_a_scales, dev_main_ptr_buffer_b, dev_main_ptr_buffer_b_scales, dev_side_ptr_grad_buffer_a);
 		if (hall_of_shame) hall_of_shame->initData(host_side_ptr, blocks_data_size, conv_blocks.size());
 		w_bytes = align16(conv_blocks.size() * pipo_db_num_groups * sizeof(uint32_t) << 2);
 		blocks_data.resize(reinterpret_cast<uint32_t*>(dev_side_ptr), conv_blocks.size() * pipo_db_num_groups << 2, MemoryType::Device);
@@ -805,6 +796,7 @@ public:
 				}
 			}
 			const auto frame_end = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - frame_start);
+			//std::cout << "[SYSTEM LOG] Run pass has finished for " << frame_end.count() << " ms." << std::endl;
 			if (frame_end < frame_rate) std::this_thread::sleep_for(frame_rate - frame_end);
 			else std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}

@@ -1,140 +1,131 @@
 #pragma once
-#include "kernels.h"
-
-template <typename T>
-struct LambdaWeightsOP
-{
-	T* ptr;
-	const int real_size_weight;
-	__host__ __device__ void operator()(size_t i) const { ptr[i] = static_cast<T>(2.0f + 0.2f * (i & (real_size_weight - 1)) / (real_size_weight - 1)); }
-};
+#include "conv_layer.h"
+#include "mamba_layer.h"
 
 class Critic
 {
 private:
-	const int in_channels, out_channels, dimension_in, real_size_weight;
-	universal_vector<__half> hidden_pool;
-	universal_vector<float> hidden_state, score_output, trace_w1, trace_lambda;
-	universal_vector<float> weights1, weights2, weights_lambda, grad_weights, grad_biases, grad_lambda;
+	const int out_channels;
 	cudaStream_t stream_forward, stream_backward;
-	const float learning_rate, f_penalty;
+	int *pipo_db, *pipo_db_num_groups;
+	std::vector<std::unique_ptr<ConvLayer>> conv_layers;
+	std::unique_ptr<MambaLayer> evaluator;
+	universal_vector<float> grad_buffer_a, score_output, score_real;
+	universal_vector<uint32_t> buffer_a, buffer_b;
+	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
 public:
-	float get_score_output() const { return score_output[0]; }
+	float get_score_output(size_t idx) const { return score_output[idx]; }
+	auto& get_output() { return score_output; }
 	void saveToFile(std::string pathFile) const
 	{
-		std::filesystem::path file_path(pathFile);
-		std::filesystem::path dir = file_path.parent_path();
-		if (!std::filesystem::exists(dir)) std::filesystem::create_directories(dir);
-		std::ofstream file(pathFile, std::ios::binary);
-		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for writing: " + pathFile);
-		universal_vector<float> weights1_tmp(real_size_weight, MemoryType::PinnedHost), weights2_tmp(out_channels, MemoryType::PinnedHost), weights_lambda_tmp(real_size_weight, MemoryType::PinnedHost);
-		checkCudaError(cudaStreamSynchronize(stream_backward));
-		checkCudaError(cudaStreamSynchronize(stream_forward));
-		weights1_tmp.copy(weights1, 0, real_size_weight, 0, real_size_weight, 0);
-		weights2_tmp.copy(weights2, 0, out_channels, 0, out_channels, 0);
-		weights_lambda_tmp.copy(weights_lambda, 0, real_size_weight, 0, real_size_weight, 0);
-		file.write(reinterpret_cast<const char*>(weights1_tmp.data()), real_size_weight * sizeof(float));
-		file.write(reinterpret_cast<const char*>(weights2_tmp.data()), out_channels * sizeof(float));
-		file.write(reinterpret_cast<const char*>(weights_lambda_tmp.data()), real_size_weight * sizeof(float));
-		file.close();
-		checkCudaError(cudaStreamSynchronize(0));
+		for (int i = 0; i < conv_layers.size(); i++) conv_layers[i]->saveToFile((std::filesystem::path(pathFile) / "conv_layers" / (std::to_string(i) + ".bin")).string());
+		evaluator->saveToFile((std::filesystem::path(pathFile) / "evaluator_layer.bin").string());
 	}
 	void loadFromFile(std::string pathFile)
 	{
-		std::ifstream file(pathFile, std::ios::binary);
-		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for reading: " + pathFile);
-		universal_vector<float> weights1_tmp(real_size_weight, MemoryType::PinnedHost), weights2_tmp(out_channels, MemoryType::PinnedHost), weights_lambda_tmp(real_size_weight, MemoryType::PinnedHost);
-		checkCudaError(cudaStreamSynchronize(stream_backward));
-		checkCudaError(cudaStreamSynchronize(stream_forward));
-		file.read(reinterpret_cast<char*>(weights1_tmp.data()), real_size_weight * sizeof(float));
-		file.read(reinterpret_cast<char*>(weights2_tmp.data()), out_channels * sizeof(float));
-		file.read(reinterpret_cast<char*>(weights_lambda_tmp.data()), real_size_weight * sizeof(float));
-		file.close();
-		weights1.copy(weights1_tmp, 0, real_size_weight, 0, real_size_weight, 0);
-		weights2.copy(weights2_tmp, 0, out_channels, 0, out_channels, 0);
-		weights_lambda.copy(weights_lambda_tmp, 0, real_size_weight, 0, real_size_weight, 0);
-		checkCudaError(cudaStreamSynchronize(0));
+		for (int i = 0; i < conv_layers.size(); i++) conv_layers[i]->loadFromFile((std::filesystem::path(pathFile) / "conv_layers" / (std::to_string(i) + ".bin")).string());
+		evaluator->loadFromFile((std::filesystem::path(pathFile) / "evaluator_layer.bin").string());
 	}
-	Critic(int inChannels, int outChannels, int in_dimension, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases, cudaStream_t stream_bwd, float learningRate, float penalty, size_t* total_mem_main_device) :
-		in_channels(inChannels), out_channels(outChannels), dimension_in(in_dimension),
-		real_size_weight(in_channels * out_channels),
-		stream_forward(stream_fwd),
-		stream_backward(stream_bwd),
-		learning_rate(learningRate),
-		f_penalty(penalty)
+	Critic(int inChannels, int outChannels, int in_dimension, cudaStream_t stream_fwd, int* total_size_grad_weights,
+		   int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups, cudaStream_t stream_bwd,
+		   float learningRate, float penalty, size_t* total_mem_main_device, size_t* total_mem_main_host) :
+		out_channels(outChannels), stream_forward(stream_fwd), stream_backward(stream_bwd),
+		pipo_db(db_pipo), pipo_db_num_groups(db_pipo_num_groups)
 	{
-		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
-		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
-		*total_mem_main_device = *total_mem_main_device + align16(real_size_weight * sizeof(float)) * 3 + align16(real_size_weight * sizeof(float)) * 2 + align16(out_channels * sizeof(float)) + align16(out_channels * sizeof(float)) + align16(in_channels * sizeof(__half));
-    }
-	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, int total_size_grad_weights, int total_size_grad_biases)
-	{
-		score_output.resize(1, MemoryType::PinnedHost);
-		size_t w_bytes = align16(real_size_weight * sizeof(float));
-		weights1.resize(reinterpret_cast<float*>(current_dev_main_ptr), real_size_weight, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(real_size_weight * sizeof(float));
-		weights_lambda.resize(reinterpret_cast<float*>(current_dev_main_ptr), real_size_weight, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(real_size_weight * sizeof(float));
-		grad_lambda.resize(reinterpret_cast<float*>(current_dev_main_ptr), real_size_weight, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(real_size_weight * sizeof(float));
-		trace_w1.resize(reinterpret_cast<float*>(current_dev_main_ptr), real_size_weight, 0.0f, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		trace_lambda.resize(reinterpret_cast<float*>(current_dev_main_ptr), real_size_weight, 0.0f, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(out_channels * sizeof(float));
-		weights2.resize(reinterpret_cast<float*>(current_dev_main_ptr), out_channels, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(out_channels * sizeof(float));
-		hidden_state.resize(reinterpret_cast<float*>(current_dev_main_ptr), out_channels, 0, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(in_channels * sizeof(__half));
-		hidden_pool.resize(reinterpret_cast<__half*>(current_dev_main_ptr), in_channels, MemoryType::Device);
-		current_dev_main_ptr += w_bytes;
-		grad_weights.resize(reinterpret_cast<float*>(dev_side_ptr_weights), total_size_grad_weights, MemoryType::Device);
-		grad_biases.resize(reinterpret_cast<float*>(dev_side_ptr_biases), total_size_grad_biases, MemoryType::Device);
-		if (isLoaded) loadFromFile(dir_path);
-		else
+		int in_channels = inChannels, middle_channels = in_channels << 2;
+		*total_mem_main_host = *total_mem_main_host + align16(out_channels * sizeof(float)) * 2;
+		conv_layers.reserve(4);
+		for (int i = in_dimension; i > 1; i >>=4)
 		{
-			generateNormalRandoms(weights1, real_size_weight, std::sqrtf(2.0f / in_channels), 0, real_size_weight);
-			generateNormalRandoms(weights2, out_channels, std::sqrtf(1.0f / out_channels), 0, out_channels);
-			weights_lambda.for_each_n(real_size_weight, LambdaWeightsOP<float>{weights_lambda.data(), real_size_weight}, 0);
+			const int max_output_dim = std::max(1, i >> 4);
+			const int local_pipo_db = std::max(middle_channels * max_output_dim * max_output_dim, in_channels * i * i);
+			const int local_pipo_db_num_groups = local_pipo_db >> 5;
+			if (*pipo_db < local_pipo_db) *pipo_db = local_pipo_db;
+			if (*pipo_db_num_groups < local_pipo_db_num_groups) *pipo_db_num_groups = local_pipo_db_num_groups;
+			conv_layers.push_back(std::make_unique<ConvLayer>(in_channels, middle_channels, i < 16 ? i : 16, i < 16 ? i : 16, i, max_output_dim, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, false));
+			in_channels = middle_channels;
+			middle_channels = in_channels << 2;
 		}
+		evaluator = std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, 0);
+    }
+	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, int total_size_grad_weights, int total_size_grad_biases, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, uint8_t*& dev_main_ptr_grad_buffer_a)
+	{
+		score_output.resize(reinterpret_cast<float*>(current_host_main_ptr), out_channels, MemoryType::PinnedHost);
+		current_host_main_ptr += align16(out_channels * sizeof(float));
+		score_real.resize(reinterpret_cast<float*>(current_host_main_ptr), out_channels, MemoryType::PinnedHost);
+		current_host_main_ptr += align16(out_channels * sizeof(float));
+		for (int i = 0; i < conv_layers.size(); i++) conv_layers[i]->initData(isLoaded, (std::filesystem::path(dir_path) / "conv_layers" / (std::to_string(i) + ".bin")).string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, false, nullptr, nullptr, total_size_grad_weights, total_size_grad_biases);
+		evaluator->initData(isLoaded, (std::filesystem::path(dir_path) / "evaluator_layer.bin").string(), current_dev_main_ptr, current_host_main_ptr, current_dev_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, false, nullptr, nullptr, total_size_grad_weights, total_size_grad_biases);
+		buffer_a.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_a), *pipo_db_num_groups << 2, MemoryType::Device);
+		buffer_a_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_a_scales), *pipo_db_num_groups, MemoryType::Device);
+		buffer_b.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_b), *pipo_db_num_groups << 2, MemoryType::Device);
+		buffer_b_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_b_scales), *pipo_db_num_groups, MemoryType::Device);
+		grad_buffer_a.resize(reinterpret_cast<float*>(dev_main_ptr_grad_buffer_a), *pipo_db, MemoryType::Device);
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales)
 	{
-		hidden_pool.fill(0, hidden_pool.size(), 0, stream_forward);
-		const int spatial_size = dimension_in * dimension_in;
-		dim3 grid(((in_channels >> 5) + gpu_block_threads - 1) / gpu_block_threads, (spatial_size + 15) >> 4);
-		LAUNCH_KERNEL(gapKernel<>, grid, gpu_block_threads, 0, stream_forward, input, input_scales, hidden_pool.data(), spatial_size, in_channels);
-		const int complex_out_channels = out_channels >> 1;
-		LAUNCH_KERNEL(criticFwd1Kernel<>, ((complex_out_channels << 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, hidden_pool.data(), weights1.data(), weights_lambda.data(), hidden_state.data(), trace_w1.data(), trace_lambda.data(), complex_out_channels, in_channels);
-		LAUNCH_KERNEL(criticFwd2Kernel<>, 1, complex_out_channels, 0, stream_forward, hidden_state.data(), weights2.data(), score_output.data(), complex_out_channels);
+		const uint32_t* base_input = input;
+		const int8_t* base_input_scales = input_scales;
+		int mask = 0;
+		for (size_t i = 0; i < conv_layers.size(); i++)
+		{
+			mask = (mask + 1) & 1;
+			uint32_t* next_input = mask ? buffer_a.data() : buffer_b.data();
+			int8_t* next_scales = mask ? buffer_a_scales.data() : buffer_b_scales.data();
+			conv_layers[i]->forward(base_input, base_input_scales, next_input, next_scales);
+			base_input = next_input;
+			base_input_scales = next_scales;
+		}
+		evaluator->forward(base_input, base_input_scales);
+		score_output.copy(evaluator->get_output(), 0, out_channels, 0, out_channels, stream_forward);
 		checkCudaError(cudaStreamSynchronize(stream_forward));
 	}
-	void backward(float real_score)
+	void backward(const float* real_score, const uint32_t* input, const int8_t* input_scales, universal_vector<float>& grad_input)
 	{
-		const int complex_out_channels = out_channels >> 1;
-		LAUNCH_KERNEL(criticApplyTracesKernel<>, ((real_size_weight >> 1) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward, weights2.data(), trace_w1.data(), trace_lambda.data(), grad_weights.data(), grad_lambda.data(), score_output[0], real_score, complex_out_channels, in_channels);
-		LAUNCH_KERNEL(criticOutputGradKernel<>, (complex_out_channels + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward, hidden_state.data(), grad_biases.data(), score_output[0], real_score, complex_out_channels);
-		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<float>{}, real_size_weight, stream_backward);
-		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<float>{}, out_channels, stream_backward);
-		const float sum_sq_l = grad_lambda.transform_reduce<float>(SquareOp<float>{}, real_size_weight, stream_backward);
-		auto clip_op = [] (float sum_sq) -> float
+		score_real.copy(real_score, 0, out_channels, 0, out_channels, stream_backward);
+		const float* real_score_ptr = score_real.data();
+		auto* __restrict__ raw_target = grad_input.data();
+		const auto* __restrict__ raw_score = evaluator->get_output().data();
+		grad_input.for_each_n(evaluator->get_output().size(), [raw_target, raw_score, real_score_ptr] __device__ (size_t i) 
 		{
-			const float norm = sqrtf(sum_sq + epsilon);
-			return norm > 1.0f ? 1.0f / norm : 1.0f;
-		};
-		LAUNCH_KERNEL(updateParamsKernel<>, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward, weights1.data(), grad_weights.data(), real_size_weight, clip_op(sum_sq_w), learning_rate, f_penalty);
-		LAUNCH_KERNEL(updateParamsKernel<>, (out_channels + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward, weights2.data(), grad_biases.data(), out_channels, clip_op(sum_sq_b), learning_rate, f_penalty);
-		LAUNCH_KERNEL(updateParamsKernel<>, (real_size_weight + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_backward, weights_lambda.data(), grad_lambda.data(), real_size_weight, clip_op(sum_sq_l), learning_rate, f_penalty);
+			raw_target[i] = raw_score[i] - real_score_ptr[i];
+		}, stream_backward);
+		const uint32_t* eval_input = input;
+		const int8_t* eval_input_scales = input_scales;
+		int mask = 0;
+		for (size_t i = 0; i < conv_layers.size(); i++)
+		{
+			mask = (mask + 1) & 1;
+			uint32_t* next_input = mask ? buffer_a.data() : buffer_b.data();
+			int8_t* next_scales = mask ? buffer_a_scales.data() : buffer_b_scales.data();
+			conv_layers[i]->forward(eval_input, eval_input_scales, next_input, next_scales);
+			eval_input = next_input;
+			eval_input_scales = next_scales;
+		}
+		int grad_mask = conv_layers.size() & 1;
+		checkCudaError(cudaStreamSynchronize(stream_forward));
+		evaluator->backward(grad_input.data(), eval_input, eval_input_scales, grad_mask ? grad_buffer_a : grad_input);
+		for (int i = conv_layers.size() - 1; i >= 0; i--)
+		{
+			const uint32_t* layer_input = input;
+			const int8_t* layer_input_scales = input_scales;
+			mask = 0;
+			for (int j = 0; j < i; j++)
+			{
+				mask = (mask + 1) & 1;
+				uint32_t* next_input = mask ? buffer_a.data() : buffer_b.data();
+				int8_t* next_scales = mask ? buffer_a_scales.data() : buffer_b_scales.data();
+				conv_layers[j]->forward(layer_input, layer_input_scales, next_input, next_scales);
+				layer_input = next_input;
+				layer_input_scales = next_scales;
+			}
+			checkCudaError(cudaStreamSynchronize(stream_forward));
+			const float* base_grad = grad_mask ? grad_buffer_a.data() : grad_input.data();
+			grad_mask ^= 1;
+			float* target_grad = grad_mask ? grad_buffer_a.data() : grad_input.data();
+			conv_layers[i]->backward(base_grad, layer_input, layer_input_scales, target_grad);
+			checkCudaError(cudaStreamSynchronize(stream_backward));
+		}
 	}
-	void reset(cudaStream_t stream_lnk = 0) 
-    {
-        hidden_state.fill(0, hidden_state.size(), 0, stream_lnk);
-        trace_w1.fill(0, trace_w1.size(), 0, stream_lnk);
-        trace_lambda.fill(0, trace_lambda.size(), 0, stream_lnk);
-    }
+	void reset(cudaStream_t stream_lnk = 0) { evaluator->reset(stream_lnk); }
 };

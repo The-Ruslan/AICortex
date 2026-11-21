@@ -11,7 +11,7 @@ struct MambaWeightsOP
 class MambaLayer
 {
 private:
-	const int out_channels, real_size_weight, num_groups, activation_type;
+	const int in_channels, out_channels, d_inner, h_states_size, real_size_weight, num_groups, activation_type;
 	cudaStream_t stream_forward, stream_backward;
 	const float learning_rate, f_penalty;
 	universal_vector<uint32_t> weights;
@@ -51,11 +51,14 @@ public:
 		LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 		checkCudaError(cudaStreamSynchronize(0));
 	}
-	MambaLayer(int output_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
-			   cudaStream_t stream_bwd, float learningRate, float penalty,
-			   size_t* total_mem_device, size_t* total_mem_host, size_t* total_learnable_data, size_t* total_learnable_data_count, int type_activation) :
+	MambaLayer(int input_channels, int output_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
+			   cudaStream_t stream_bwd, float learningRate, float penalty, size_t* total_mem_device, size_t* total_mem_host,
+			   size_t* total_learnable_data, size_t* total_learnable_data_count, int type_activation) :
+		in_channels(input_channels),
 		out_channels(output_channels),
-		real_size_weight(mamba_d_inner * (2 + mamba_mimo_group_size + (mamba_d_state << 2) + out_channels)),
+		d_inner(in_channels << 1),
+		h_states_size(d_inner * mamba_d_state),
+		real_size_weight(d_inner * (2 + mamba_mimo_group_size + (mamba_d_state << 2) + out_channels)),
 		num_groups(real_size_weight >> 5),
 		activation_type(type_activation),
 		stream_forward(stream_fwd),
@@ -65,7 +68,7 @@ public:
 	{
 		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
 		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
-		*total_mem_device = *total_mem_device + align16(num_groups * sizeof(uint32_t) << 2) + align16(num_groups * sizeof(int8_t)) + align16(out_channels * sizeof(float)) + align16(out_channels * sizeof(float)) + align16(mamba_h_states_size * sizeof(float2)) + align16(mamba_d_in_sta * sizeof(float2)) * 3 + align16(mamba_d_inner * sizeof(float));
+		*total_mem_device = *total_mem_device + align16(num_groups * sizeof(uint32_t) << 2) + align16(num_groups * sizeof(int8_t)) + align16(out_channels * sizeof(float)) + align16(out_channels * sizeof(float)) + align16(h_states_size * sizeof(float2)) + align16(h_states_size * sizeof(float2)) * 3 + align16(d_inner * sizeof(float));
 		*total_mem_host = *total_mem_host + align16(real_size_weight * sizeof(float));
 		if (total_learnable_data) *total_learnable_data = *total_learnable_data + real_size_weight + out_channels;
 		if (total_learnable_data_count) *total_learnable_data_count = *total_learnable_data_count + 2;
@@ -87,62 +90,68 @@ public:
 		w_bytes = align16(real_size_weight * sizeof(float));
 		master_weights.resize(reinterpret_cast<float*>(current_host_main_ptr), real_size_weight, MemoryType::PinnedHost);
 		current_host_main_ptr += w_bytes;
-		w_bytes = align16(mamba_h_states_size * sizeof(float2));
-		h_states.resize(reinterpret_cast<float2*>(current_dev_main_ptr), mamba_h_states_size, make_float2(0.0f, 0.0f), MemoryType::Device);
+		w_bytes = align16(h_states_size * sizeof(float2));
+		h_states.resize(reinterpret_cast<float2*>(current_dev_main_ptr), h_states_size, make_float2(0.0f, 0.0f), MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
-		w_bytes = align16(mamba_d_inner * sizeof(float));
-		y_ssm.resize(reinterpret_cast<float*>(current_dev_main_ptr), mamba_d_inner, MemoryType::Device);
+		w_bytes = align16(d_inner * sizeof(float));
+		y_ssm.resize(reinterpret_cast<float*>(current_dev_main_ptr), d_inner, MemoryType::Device);
 		current_dev_main_ptr += w_bytes;
 		if (!is_in_inference)
 		{
 			grad_weights.resize(reinterpret_cast<float*>(dev_side_ptr_weights), total_size_grad_weights, MemoryType::Device);
 			grad_biases.resize(reinterpret_cast<float*>(dev_side_ptr_biases), total_size_grad_biases, MemoryType::Device);
-			w_bytes = align16(mamba_d_in_sta * sizeof(float2));
-			trace_A.resize(reinterpret_cast<float2*>(current_dev_side_ptr), mamba_d_in_sta, MemoryType::Device);
+			w_bytes = align16(h_states_size * sizeof(float2));
+			trace_A.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
-			trace_B.resize(reinterpret_cast<float2*>(current_dev_side_ptr), mamba_d_in_sta, MemoryType::Device);
+			trace_B.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
-			trace_Delta.resize(reinterpret_cast<float2*>(current_dev_side_ptr), mamba_d_in_sta, MemoryType::Device);
+			trace_Delta.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
-			**meta_adapted_data = master_weights.data();
-			(*meta_adapted_data) += 1;
-			**meta_adapted_data = biases.data();
-			(*meta_adapted_data) += 1;
-			**meta_adapted_offsets = real_size_weight;
-			(*meta_adapted_offsets) += 1;
-			**meta_adapted_offsets = out_channels;
-			(*meta_adapted_offsets) += 1;
+			if (meta_adapted_data)
+			{
+				**meta_adapted_data = master_weights.data();
+				(*meta_adapted_data) += 1;
+				**meta_adapted_data = biases.data();
+				(*meta_adapted_data) += 1;
+			}
+			if (meta_adapted_offsets)
+			{
+				**meta_adapted_offsets = real_size_weight;
+				(*meta_adapted_offsets) += 1;
+				**meta_adapted_offsets = out_channels;
+				(*meta_adapted_offsets) += 1;
+			}
 		}
 		if (isLoaded) loadFromFile(dir_path);
 		else
 		{
-			generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / mamba_d_inner), 0, real_size_weight);
+			generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / d_inner), 0, real_size_weight);
 			biases.fill(0, biases.size(), 0, 0);
-			for(int b = 0; b < (mamba_d_inner + mamba_mimo_group_size - 1) / mamba_mimo_group_size; ++b)
+			for(int b = 0; b < (d_inner + mamba_mimo_group_size - 1) / mamba_mimo_group_size; ++b)
 			{
 				for(int row = 0; row < mamba_mimo_group_size; ++row)
 				{
 					for(int col = 0; col < mamba_mimo_group_size; ++col)
 					{
-						const size_t global_idx = mamba_d_inner + b * mamba_mimo_matrix_elements + row * mamba_mimo_group_size + col;
+						const size_t global_idx = d_inner + b * mamba_mimo_matrix_elements + row * mamba_mimo_group_size + col;
 						if (global_idx >= real_size_weight) break;
 						master_weights[global_idx] = fmaf(getFastRandomFloatBoundedUniform(global_idx, std::sqrtf(1.0f / mamba_mimo_group_size)), 0.1f, static_cast<float>(row == col));
 					}
 				}
 			}
-			constexpr size_t off_A_re = mamba_d_inner + (mamba_d_inner << 5) + mamba_d_in_sta + mamba_d_in_sta, off_A_im = off_A_re + mamba_d_in_sta;
-			master_weights.for_each_n(mamba_d_in_sta, MambaWeightsOP<float>{master_weights.data() + off_A_re}, 0);
-			master_weights.fill(off_A_im, off_A_im + mamba_d_in_sta, 0.001f, 0);
+			const size_t off_A_re = d_inner + (d_inner << 5) + h_states_size + h_states_size, off_A_im = off_A_re + h_states_size;
+			master_weights.for_each_n(h_states_size, MambaWeightsOP<float>{master_weights.data() + off_A_re}, 0);
+			master_weights.fill(off_A_im, off_A_im + h_states_size, 0.001f, 0);
 			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 		}
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales)
 	{
-		LAUNCH_KERNEL(mambaSSMFwdStateKernel<>, mamba_d_inner / gpu_block_threads, gpu_block_threads, 0, stream_forward, input, input_scales, weights.data(), weight_scales.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), y_ssm.data());
+		LAUNCH_KERNEL(mambaSSMFwdStateKernel<>, d_inner / gpu_block_threads, gpu_block_threads, 0, stream_forward, input, input_scales, weights.data(), weight_scales.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), y_ssm.data(), in_channels, d_inner);
 		const int act_grid = (out_channels + gpu_block_threads - 1) / gpu_block_threads;
-		if (activation_type == 0) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<0>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels);
-		else if (activation_type == 1) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<1>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels);
-		else LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<2>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels);
+		if (activation_type == 0) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<0>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels, d_inner);
+		else if (activation_type == 1) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<1>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels, d_inner);
+		else LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<2>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels, d_inner);
 	}
 	void backward(const float* grad_output, const uint32_t* input, const int8_t* input_scales, universal_vector<float>& grad_input)
 	{
@@ -150,13 +159,13 @@ public:
 		grad_biases.fill(0, out_channels, 0, stream_backward);
 		grad_input.fill(0, grad_input.size(), 0, stream_backward);
 		mamba_output.fill(0, out_channels, 0, stream_backward);
-		dim3 proj_grid(out_channels >> 5, mamba_d_inner / gpu_block_threads, 1);
-		LAUNCH_KERNEL(mambaSSMBwdOutProjKernel<>, proj_grid, gpu_block_threads, 0, stream_backward, input, input_scales, h_states.data(), master_weights.data(), mamba_output.data(), out_channels);
+		dim3 proj_grid(out_channels >> 5, d_inner / gpu_block_threads, 1);
+		LAUNCH_KERNEL(mambaSSMBwdOutProjKernel<>, proj_grid, gpu_block_threads, 0, stream_backward, input, input_scales, h_states.data(), master_weights.data(), mamba_output.data(), in_channels, out_channels, d_inner);
 		const int act_grid = (out_channels + gpu_block_threads - 1) / gpu_block_threads;
 		if (activation_type == 0) LAUNCH_KERNEL(mambaSSMBwdNormActKernel<0>, act_grid, gpu_block_threads, 0, stream_backward, mamba_output.data(), biases.data(), grad_output, grad_biases.data(), out_channels);
 		else if (activation_type == 1) LAUNCH_KERNEL(mambaSSMBwdNormActKernel<1>, act_grid, gpu_block_threads, 0, stream_backward, mamba_output.data(), biases.data(), grad_output, grad_biases.data(), out_channels);
 		else LAUNCH_KERNEL(mambaSSMBwdNormActKernel<2>, act_grid, gpu_block_threads, 0, stream_backward, mamba_output.data(), biases.data(), grad_output, grad_biases.data(), out_channels);
-		LAUNCH_KERNEL(mambaSSMApplyTracesKernel<>, mamba_d_inner / gpu_block_threads, gpu_block_threads, 0, stream_backward, input, input_scales, mamba_output.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), master_weights.data(), grad_weights.data(), grad_input.data(), out_channels);
+		LAUNCH_KERNEL(mambaSSMApplyTracesKernel<>, d_inner / gpu_block_threads, gpu_block_threads, 0, stream_backward, input, input_scales, mamba_output.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), master_weights.data(), grad_weights.data(), grad_input.data(), in_channels, out_channels, d_inner);
 		const float sum_sq_w = grad_weights.transform_reduce<float>(SquareOp<float>{}, real_size_weight, stream_backward);
 		const float sum_sq_b = grad_biases.transform_reduce<float>(SquareOp<float>{}, out_channels, stream_backward);
 		auto clip_op = [] (float sum_sq) -> float

@@ -99,6 +99,16 @@ public:
 			std::copy(src.data() + src_begin, src.data() + src_begin + copy_elements, m_data + dest_begin);
 		}
 	}
+	void copy(const T* src, size_t dest_begin, size_t dest_end, size_t src_begin, size_t src_end, cudaStream_t stream = 0)
+	{
+		if (!src || m_size == 0 || dest_begin >= m_size || dest_begin >= dest_end || src_begin >= src_end) return;
+		const size_t dest_len = (dest_end > m_size ? m_size : dest_end) - dest_begin;
+		const size_t src_len = src_end - src_begin;
+		const size_t copy_elements = dest_len < src_len ? dest_len : src_len;
+		if (copy_elements == 0) return; 
+		checkCudaError(cudaMemcpyAsync(m_data + dest_begin, src + src_begin, copy_elements * sizeof(T), cudaMemcpyDefault, stream));
+		if (m_mem_type == MemoryType::PinnedHost && stream != 0) checkCudaError(cudaStreamSynchronize(stream));
+	}
 	void clear()
 	{
 		if (m_data && m_mode == VectorMode::Allocation)

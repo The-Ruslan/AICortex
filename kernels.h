@@ -1078,20 +1078,19 @@ __global__ void __launch_bounds__(threads_per_block, 4) residualAddBwdKernel(flo
 	}
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, float2* __restrict__ h_states, float2* __restrict__ trace_A, float2* __restrict__ trace_B, float2* __restrict__ trace_Delta, float* __restrict__ y_ssm_out)
+__global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, float2* __restrict__ h_states, float2* __restrict__ trace_A, float2* __restrict__ trace_B, float2* __restrict__ trace_Delta, float* __restrict__ y_ssm_out, int InC, int d_inner)
 {
-	constexpr int num_warps = threads_per_block >> 5,
-				  off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
-				  off_W_C_im = off_W_C_re + mamba_d_inner * mamba_d_state,
-				  off_A_re = off_W_C_im + mamba_d_inner * mamba_d_state,
-				  off_A_im = off_A_re + mamba_d_inner * mamba_d_state,
-				  off_D = off_A_im + mamba_d_inner * mamba_d_state,
-				  mamba_cols = mamba_d_state >> 5;
+	constexpr int num_warps = threads_per_block >> 5, mamba_cols = mamba_d_state >> 5;
+	const int off_W_C_re = d_inner + (d_inner << 5),
+			  off_W_C_im = off_W_C_re + d_inner * mamba_d_state,
+			  off_A_re = off_W_C_im + d_inner * mamba_d_state,
+			  off_A_im = off_A_re + d_inner * mamba_d_state,
+			  off_D = off_A_im + d_inner * mamba_d_state;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
 	const int block_ch_idx = (blockIdx.x * num_warps + warp_id) << 5;
 	const int ch = block_ch_idx + lane_id;
-	const int in_ch_idx = ch & (final_channels - 1);
+	const int in_ch_idx = ch & (InC - 1);
 	float2 h_l[mamba_cols], trA[mamba_cols], trB[mamba_cols], trDelta[mamba_cols];
 	const int base_row_tr = ch * mamba_d_state, base_row_tr_lane_id = base_row_tr + lane_id;
 	#pragma unroll
@@ -1120,9 +1119,9 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(c
 	}
 	const int8_t input_scale = input_scales[in_ch_idx >> 5];
 	const int mimo_block_id = block_ch_idx / mamba_mimo_group_size;
-	const int8_t B_single_scale = weight_scales[(mamba_d_inner + mimo_block_id * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size) >> 5];
+	const int8_t B_single_scale = weight_scales[(d_inner + mimo_block_id * mamba_mimo_matrix_elements + lane_id * mamba_mimo_group_size) >> 5];
 	uint32_t B_row_packed[4];
-	*reinterpret_cast<uint4*>(B_row_packed) = *reinterpret_cast<const uint4*>(&weights[(mamba_d_inner >> 3) + mimo_block_id * (mamba_mimo_matrix_elements >> 3) + (lane_id << 2)]);
+	*reinterpret_cast<uint4*>(B_row_packed) = *reinterpret_cast<const uint4*>(&weights[(d_inner >> 3) + mimo_block_id * (mamba_mimo_matrix_elements >> 3) + (lane_id << 2)]);
 	const uint32_t weight_u32 = weights[ch >> 3];
 	const int8_t weight_scale = weight_scales[ch >> 5];
 	const uint4 x_v4 = lane_id == 0 ? *reinterpret_cast<const uint4*>(&input[in_ch_idx >> 3]) : make_uint4(0, 0, 0, 0);
@@ -1186,29 +1185,29 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(c
 	}
 }
 template <int activation_type = 1, int channels_per_block = gpu_block_threads>
-__global__ void __launch_bounds__(channels_per_block, 4) mambaSSMFwdOutProjKernel(const float* __restrict__ y_ssm, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const float* __restrict__ biases, float* __restrict__ output, int OutC)
+__global__ void __launch_bounds__(channels_per_block, 4) mambaSSMFwdOutProjKernel(const float* __restrict__ y_ssm, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, const float* __restrict__ biases, float* __restrict__ output, int OutC, int d_inner)
 {
-	constexpr int warps = channels_per_block >> 5,
-				  off_W_out = mamba_d_inner + (mamba_d_inner << 5) + 4 * mamba_d_inner * mamba_d_state + mamba_d_inner;
+	constexpr int warps = channels_per_block >> 5;
+	const int off_W_out = d_inner + (d_inner << 5) + 4 * d_inner * mamba_d_state + d_inner;
 	const int oc = blockIdx.x * channels_per_block + threadIdx.x;
 	__shared__ float smem_warps[warps];
 	if (threadIdx.x < warps) smem_warps[threadIdx.x] = 0.0f;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
-	const int w_base = off_W_out + oc * mamba_d_inner;
+	const int w_base = off_W_out + oc * d_inner;
 	const float4* __restrict__ y_v4 = reinterpret_cast<const float4*>(y_ssm);
 	float acc = 0.0f;
-	for (int ic_base = 0; ic_base < mamba_d_inner; ic_base += 128)
+	for (int ic_base = 0; ic_base < d_inner; ic_base += 128)
 	{
 		const int y_idx = (ic_base >> 2) + lane_id;
-		const float4 y_reg = ic_base + (lane_id << 2) < mamba_d_inner ? y_v4[y_idx] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+		const float4 y_reg = ic_base + (lane_id << 2) < d_inner ? y_v4[y_idx] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 		const auto& y_arr = reinterpret_cast<const float(&)[4]>(y_reg);
 		float y_arr_local[8] = {};
 		#pragma unroll
 		for (int g = 0; g < 4; ++g)
 		{
 			const int curr_ic = ic_base + (g << 5);
-			if (curr_ic >= mamba_d_inner) break;
+			if (curr_ic >= d_inner) break;
 			uint4 w_curr = make_uint4(0, 0, 0, 0);
 			int8_t w_scale = 0;
 			if (oc < OutC)
@@ -1258,21 +1257,20 @@ __global__ void __launch_bounds__(channels_per_block, 4) mambaSSMFwdOutProjKerne
     else output[oc] = sigmoid(val);
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void mambaSSMBwdOutProjKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const float2* __restrict__ h_states, const float* __restrict__ master_weights, float* __restrict__ raw_out_buf, int OutC)
+__global__ void mambaSSMBwdOutProjKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const float2* __restrict__ h_states, const float* __restrict__ master_weights, float* __restrict__ raw_out_buf, int InC, int OutC, int d_inner)
 {
-	constexpr int num_warps = threads_per_block >> 5,
-				  off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
-				  off_W_C_im = off_W_C_re + mamba_d_inner * mamba_d_state,
-				  off_A_re = off_W_C_im + mamba_d_inner * mamba_d_state,
-				  off_A_im = off_A_re + mamba_d_inner * mamba_d_state,
-				  off_D = off_A_im + mamba_d_inner * mamba_d_state,
-				  off_W_out = off_D + mamba_d_inner,
-				  mamba_cols = mamba_d_state >> 5;
+	constexpr int num_warps = threads_per_block >> 5, mamba_cols = mamba_d_state >> 5;
+	const int off_W_C_re = d_inner + (d_inner << 5),
+			  off_W_C_im = off_W_C_re + d_inner * mamba_d_state,
+			  off_A_re = off_W_C_im + d_inner * mamba_d_state,
+			  off_A_im = off_A_re + d_inner * mamba_d_state,
+			  off_D = off_A_im + d_inner * mamba_d_state,
+			  off_W_out = off_D + d_inner;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
 	const int block_ch_idx = (blockIdx.y * num_warps + warp_id) << 5;
 	const int ch_idx = block_ch_idx + lane_id;
-	const int in_ch_idx = ch_idx & (final_channels - 1);
+	const int in_ch_idx = ch_idx & (InC - 1);
 	__shared__ float s_y_ssm[num_warps][33];
 	float y_ssm_ch = master_weights[off_D + ch_idx] * dequantize_scalar(input[in_ch_idx >> 3], in_ch_idx & 7, input_scales[in_ch_idx >> 5]);
 	const int base_tr_lane_id = ch_idx * mamba_d_state + lane_id;
@@ -1290,7 +1288,7 @@ __global__ void mambaSSMBwdOutProjKernel(const uint32_t* __restrict__ input, con
 	const int oc = (blockIdx.x << 5) + (warp_id << 2) + (lane_id >> 3);
 	const int lane_id_v8 = lane_id & 7;
 	const int block_ic_base = blockIdx.y * threads_per_block;
-	const int w_idx_base = off_W_out + oc * mamba_d_inner + block_ic_base + (lane_id_v8 << 5);
+	const int w_idx_base = off_W_out + oc * d_inner + block_ic_base + (lane_id_v8 << 5);
 	float sum_out = 0.0f;
 	__syncthreads();
 	#pragma unroll
@@ -1334,23 +1332,22 @@ __global__ void mambaSSMBwdNormActKernel(float* __restrict__ raw_out_to_g_normed
 	raw_out_to_g_normed[oc] = g_act * inv_rms;
 }
 template <int threads_per_block = gpu_block_threads>
-__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const float* __restrict__ g_normed_buf, const float2* __restrict__ h_states, const float2* __restrict__ trace_A, const float2* __restrict__ trace_B, const float2* __restrict__ trace_Delta, const float* __restrict__ master_weights, float* __restrict__ grad_weights, float* __restrict__ grad_input, int OutC)
+__global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const float* __restrict__ g_normed_buf, const float2* __restrict__ h_states, const float2* __restrict__ trace_A, const float2* __restrict__ trace_B, const float2* __restrict__ trace_Delta, const float* __restrict__ master_weights, float* __restrict__ grad_weights, float* __restrict__ grad_input, int InC, int OutC, int d_inner)
 {
-	constexpr int num_warps = threads_per_block >> 5,
-				  off_W_C_re = mamba_d_inner + (mamba_d_inner << 5),
-				  off_W_C_im = off_W_C_re + mamba_d_inner * mamba_d_state,
-				  off_A_re = off_W_C_im + mamba_d_inner * mamba_d_state,
-				  off_A_im = off_A_re + mamba_d_inner * mamba_d_state,
-				  off_D = off_A_im + mamba_d_inner * mamba_d_state,
-				  off_W_out = off_D + mamba_d_inner,
-				  mamba_cols = mamba_d_state >> 5;
+	constexpr int num_warps = threads_per_block >> 5, mamba_cols = mamba_d_state >> 5;
+	const int off_W_C_re = d_inner + (d_inner << 5),
+			  off_W_C_im = off_W_C_re + d_inner * mamba_d_state,
+			  off_A_re = off_W_C_im + d_inner * mamba_d_state,
+			  off_A_im = off_A_re + d_inner * mamba_d_state,
+			  off_D = off_A_im + d_inner * mamba_d_state,
+			  off_W_out = off_D + d_inner;
 	const int lane_id = threadIdx.x & 31;
 	const int warp_id = threadIdx.x >> 5;
 	const int block_ch_idx = (blockIdx.x * num_warps + warp_id) << 5;
 	const int ch_idx = block_ch_idx + lane_id;
 	const float D_skip = master_weights[off_D + ch_idx];
 	const float W_delta = master_weights[ch_idx];
-	const int in_ch_idx = ch_idx & (final_channels - 1);
+	const int in_ch_idx = ch_idx & (InC - 1);
 	const uint32_t raw_input_xt = input[in_ch_idx >> 3];
 	const int8_t raw_input_scales_xt = input_scales[in_ch_idx >> 5];
 	const int base_tr_lane_id = ch_idx * mamba_d_state + lane_id;
@@ -1370,12 +1367,12 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 	for (int oc = 0; oc < OutC; ++oc)
 	{
 		const float g_normed = g_normed_buf[oc];
-		const int w_out_idx = off_W_out + oc * mamba_d_inner + ch_idx;
+		const int w_out_idx = off_W_out + oc * d_inner + ch_idx;
 		const float w_out = master_weights[w_out_idx];
 		grad_weights[w_out_idx] = g_normed * y_ssm_ch;
 		grad_y_ssm = fmaf(g_normed, w_out, grad_y_ssm);
 	}
-	const int mimo_group_base = mamba_d_inner + (block_ch_idx / mamba_mimo_group_size) * mamba_mimo_matrix_elements;
+	const int mimo_group_base = d_inner + block_ch_idx / mamba_mimo_group_size * mamba_mimo_matrix_elements;
 	const int bre_base_id = mimo_group_base + lane_id * mamba_mimo_group_size;
 	float g_dt_total = 0.0f, g_B_mimo_total = 0.0f;
 	#pragma unroll
@@ -1404,7 +1401,7 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 	#pragma unroll
 	for (int k = 0; k < mamba_mimo_group_size; ++k)
 	{
-		const int src_in_ch = (lane_mimo_block_ch + k) & (final_channels - 1);
+		const int src_in_ch = (lane_mimo_block_ch + k) & (InC - 1);
 		const uint32_t raw_input_mimo = input[src_in_ch >> 3];
 		const int8_t raw_input_scales_mimo = input_scales[src_in_ch >> 5];
 		const float B_val_raw = master_weights[lane_in_mimo_g + (group_base_lane + k) * mamba_mimo_group_size];
@@ -1649,157 +1646,4 @@ __global__ void fftColumnKernel(const __half2* __restrict__ input, __half* __res
 		output[offset_out] = __float2half(__fsqrt_rn(fmaf(re, re, im * im)) * norm);
 		output[offset_out + resolution * resolution] = __float2half(atan2f(im, re));
 	}
-}
-template <typename T>
-__global__ void gapKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, T* __restrict__ pooled_features, int spatial_size, int InC)
-{
-	const int base_ch_idx = (blockIdx.x * blockDim.x + threadIdx.x) << 5;
-	if (base_ch_idx >= InC) return;
-	const int groups_per_in = InC >> 5;
-	const int scale_group_idx = base_ch_idx >> 5;
-	float sum[32] = {};
-	constexpr int elements_per_block = 16;
-	const int start_i = blockIdx.y * elements_per_block;
-	const int end_i = min(start_i + elements_per_block, spatial_size);
-	const uint4* __restrict__ input_v4 = reinterpret_cast<const uint4*>(input + (base_ch_idx >> 3));
-	for (int i = start_i; i < end_i; ++i) 
-	{
-		uint4 packed_v4 = input_v4[i * groups_per_in];
-		const auto& packed_words = reinterpret_cast<const uint32_t(&)[4]>(packed_v4);
-		const float scale = dequantize_scale(input_scales[i * groups_per_in + scale_group_idx]);
-		#pragma unroll
-		for (int w = 0; w < 4; ++w)
-		{
-			#pragma unroll
-			for (int e = 0; e < 8; ++e)
-			{
-				const int sum_idx = (w << 3) + e;
-				sum[sum_idx] = fmaf(extract_int4(packed_words[w], e), scale, sum[sum_idx]);
-			}
-		}
-	}
-	const float spatial_size_inv = __frcp_rn(spatial_size);
-	#pragma unroll
-	for (int c = 0; c < 32; ++c) atomicAdd(&pooled_features[base_ch_idx + c], static_cast<T>(sum[c] * spatial_size_inv));
-}
-template <typename T>
-__global__ void criticFwd1Kernel(const T* __restrict__ hidden_pool, const float* __restrict__ weights1, const float* __restrict__ weights_lambda, float* __restrict__ hidden_state, float* __restrict__ trace_w1, float* __restrict__ trace_lambda, int out_channels, int in_channels)
-{
-	const int idx = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-	if (idx >= out_channels) return;
-	const int lane_id = threadIdx.x & 31;
-	float2 acc_val = make_float2(0.0f, 0.0f), acc_lam = make_float2(0.0f, 0.0f);
-	for (int c = lane_id; c < in_channels; c += 32)
-	{
-		const T x = hidden_pool[c];
-		const int idx_w1 = (c * out_channels + idx) << 1;
-		const int idx_wl = (idx * in_channels + c) << 1;
-		const float2 w1_val = make_float2(weights1[idx_w1], weights1[idx_w1 + 1]);
-		const float2 lam_val = make_float2(weights_lambda[idx_wl], weights_lambda[idx_wl + 1]);
-		const float x_f = static_cast<float>(x);
-		acc_val.x = fmaf(x_f, w1_val.x, acc_val.x);
-		acc_val.y = fmaf(x_f, w1_val.y, acc_val.y);
-		acc_lam.x = fmaf(x_f, lam_val.x, acc_lam.x);
-		acc_lam.y = fmaf(x_f, lam_val.y, acc_lam.y);
-	}
-	#pragma unroll
-	for (int i = 16; i > 0; i >>= 1) 
-	{
-		acc_val.x += __shfl_down_sync(0xFFFFFFFF, acc_val.x, i);
-		acc_val.y += __shfl_down_sync(0xFFFFFFFF, acc_val.y, i);
-		acc_lam.x += __shfl_down_sync(0xFFFFFFFF, acc_lam.x, i);
-		acc_lam.y += __shfl_down_sync(0xFFFFFFFF, acc_lam.y, i);
-	}
-	acc_val.x = __shfl_sync(0xFFFFFFFF, acc_val.x, 0);
-	acc_val.y = __shfl_sync(0xFFFFFFFF, acc_val.y, 0);
-	acc_lam.x = __shfl_sync(0xFFFFFFFF, acc_lam.x, 0);
-	acc_lam.y = __shfl_sync(0xFFFFFFFF, acc_lam.y, 0);
-	float2* h_state_v2 = reinterpret_cast<float2*>(hidden_state);
-	const float2 h_old = h_state_v2[idx];
-	float sigm_re, sigm_im, lambda_soft, lam_mod_inv;
-	if (lane_id == 0)
-	{
-		sigm_re = sigmoid(acc_val.x);
-		sigm_im = sigmoid(acc_val.y);
-		const float lam_mod = sqrtf(fmaf(acc_lam.x, acc_lam.x, fmaf(acc_lam.y, acc_lam.y, epsilon)));
-		lambda_soft = sigmoid(lam_mod);
-		lam_mod_inv = __frcp_rn(lam_mod);
-	}
-	sigm_re = __shfl_sync(0xFFFFFFFF, sigm_re, 0);
-	sigm_im = __shfl_sync(0xFFFFFFFF, sigm_im, 0);
-	lambda_soft = __shfl_sync(0xFFFFFFFF, lambda_soft, 0);
-	lam_mod_inv = __shfl_sync(0xFFFFFFFF, lam_mod_inv, 0);
-	const float dh_dact = 1.0f - lambda_soft;
-	const float2 act_curr = make_float2(acc_val.x * sigm_re, acc_val.y * sigm_im);
-	if (lane_id == 0) h_state_v2[idx] = make_float2(fmaf(h_old.x, lambda_soft, dh_dact * act_curr.x), fmaf(h_old.y, lambda_soft, dh_dact * act_curr.y));
-	const float act_grad_re = dh_dact * sigm_re * fmaf(acc_val.x, 1.0f - sigm_re, 1.0f);
-	const float act_grad_im = dh_dact * sigm_im * fmaf(acc_val.y, 1.0f - sigm_im, 1.0f);
-	const float dlambda = (h_old.x - act_curr.x + h_old.y - act_curr.y) * lambda_soft * dh_dact * lam_mod_inv;
-	float2* t_w1_v2 = reinterpret_cast<float2*>(trace_w1);
-	float2* t_lam_v2 = reinterpret_cast<float2*>(trace_lambda);
-	for (int c = lane_id; c < in_channels; c += 32)
-	{
-		const T x_input = hidden_pool[c];
-		const int w1_idx = c * out_channels + idx, wl_idx = idx * in_channels + c;
-		float2 t_w1 = t_w1_v2[w1_idx], t_lam = t_lam_v2[wl_idx];
-		const float x_input_f = static_cast<float>(x_input);
-		t_w1.x = fmaf(t_w1.x, lambda_soft, act_grad_re * x_input_f);
-		t_w1.y = fmaf(t_w1.y, lambda_soft, act_grad_im * x_input_f);
-		t_w1_v2[w1_idx] = t_w1;
-		t_lam.x = fmaf(t_lam.x, lambda_soft, dlambda * x_input_f * acc_lam.x);
-		t_lam.y = fmaf(t_lam.y, lambda_soft, dlambda * x_input_f * acc_lam.y);
-		t_lam_v2[wl_idx] = t_lam;
-	}
-}
-template <int dummy = 0>
-__global__ void criticFwd2Kernel(const float* __restrict__ hidden_state, const float* __restrict__ weights2, float* __restrict__ output_score, int out_channels)
-{
-	__shared__ float warp_sums[32];
-	float local_sum = 0.0f;
-	const float2* h_state_v2 = reinterpret_cast<const float2*>(hidden_state);
-	for (int i = threadIdx.x; i < out_channels; i += blockDim.x) 
-	{
-		const float2 f = h_state_v2[i];
-		const float2 w2 = make_float2(weights2[i << 1], weights2[(i << 1) + 1]);
-		local_sum = fmaf(f.x, w2.x, fmaf(f.y, w2.y, local_sum));
-	}
-	#pragma unroll
-	for (int i = 16; i > 0; i >>= 1) local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, i);
-	const int lane_id = threadIdx.x & 31, warpId = threadIdx.x >> 5, num_warps = blockDim.x >> 5;
-	if (lane_id == 0) warp_sums[warpId] = local_sum;
-	__syncthreads();
-	if (warpId == 0) 
-	{
-		float final_warp_sum = lane_id < num_warps ? warp_sums[lane_id] : 0.0f;
-		#pragma unroll
-		for (int i = 16; i > 0; i >>= 1) final_warp_sum += __shfl_down_sync(0xFFFFFFFF, final_warp_sum, i);
-		if (threadIdx.x == 0) *output_score = final_warp_sum;
-	}
-}
-template <int dummy = 0>
-__global__ void criticApplyTracesKernel(const float* __restrict__ w2, const float* __restrict__ trace_w1, const float* __restrict__ trace_lambda, float* __restrict__ grad_weights1, float* __restrict__ grad_lambda, float pred_score, float real_score, int out_channels, int in_channels)
-{
-	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx >= out_channels * in_channels) return;
-	const float2 t_w1 = reinterpret_cast<const float2*>(trace_w1)[idx];
-	const float2 t_lam = reinterpret_cast<const float2*>(trace_lambda)[idx];
-	const int idx_node = (idx & (out_channels - 1)) << 1;
-	const int idx_lam  = (idx / in_channels) << 1;
-	const float2 w2_node = make_float2(w2[idx_node], w2[idx_node + 1]);
-	const float2 w2_lam_node = make_float2(w2[idx_lam], w2[idx_lam + 1]);
-	const float grad_out = pred_score - real_score;
-	grad_weights1[idx << 1] = grad_out * w2_node.x * t_w1.x;
-	grad_weights1[(idx << 1) + 1] = grad_out * w2_node.y * t_w1.y;
-	grad_lambda[idx << 1] = grad_out * w2_lam_node.x * t_lam.x;
-	grad_lambda[(idx << 1) + 1] = grad_out * w2_lam_node.y * t_lam.y;
-}
-template <int dummy = 0>
-__global__ void criticOutputGradKernel(const float* __restrict__ hidden_state, float* __restrict__ grad_w2, float pred_score, float real_score, int out_channels)
-{
-	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx >= out_channels) return;
-	const float2 hidden_s = reinterpret_cast<const float2*>(hidden_state)[idx];
-	const float grad_out = pred_score - real_score;
-	grad_w2[idx << 1] = grad_out * hidden_s.x;
-	grad_w2[(idx << 1) + 1] = grad_out * hidden_s.y;
 }

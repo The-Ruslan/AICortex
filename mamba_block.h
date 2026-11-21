@@ -15,15 +15,15 @@ public:
 	auto& get_output() { return mamba_layers[mamba_layers.size() < 1 ? 0 : mamba_layers.size() - 1]->get_output(); }
 	void saveToFile(std::string pathFile) const
 	{
-		mamba_layers[0]->saveToFile((std::filesystem::path(pathFile) / "mamba_strategist.bin").string());
-		mamba_layers[1]->saveToFile((std::filesystem::path(pathFile) / "mamba_tactic.bin").string());
-		mamba_layers[2]->saveToFile((std::filesystem::path(pathFile) / "mamba_executor.bin").string());
+		mamba_layers[0]->saveToFile((std::filesystem::path(pathFile) / "mamba_1.bin").string());
+		mamba_layers[1]->saveToFile((std::filesystem::path(pathFile) / "mamba_2.bin").string());
+		mamba_layers[2]->saveToFile((std::filesystem::path(pathFile) / "mamba_3.bin").string());
 	}
 	void loadFromFile(std::string pathFile)
 	{
-		mamba_layers[0]->loadFromFile((std::filesystem::path(pathFile) / "mamba_strategist.bin").string());
-		mamba_layers[1]->loadFromFile((std::filesystem::path(pathFile) / "mamba_tactic.bin").string());
-		mamba_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "mamba_executor.bin").string());
+		mamba_layers[0]->loadFromFile((std::filesystem::path(pathFile) / "mamba_1.bin").string());
+		mamba_layers[1]->loadFromFile((std::filesystem::path(pathFile) / "mamba_2.bin").string());
+		mamba_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "mamba_3.bin").string());
 	}
 	MambaBlock(int in_channels, int out_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
 			   float survival_probability, float res_factor, cudaStream_t stream_bwd, float learning_rate, float penalty,
@@ -36,15 +36,15 @@ public:
 		residual_factor(res_factor)
     {
 		mamba_layers.reserve(3);
-		mamba_layers.push_back(std::make_unique<MambaLayer>(input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
-		mamba_layers.push_back(std::make_unique<MambaLayer>(input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
-		mamba_layers.push_back(std::make_unique<MambaLayer>(output_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, activation_type));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, output_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, activation_type));
 	}
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float**& meta_adapted_data, size_t*& meta_adapted_offsets, uint8_t*& dev_side_ptr_grad_buffer_a, uint8_t*& dev_side_ptr_grad_residual, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, int pipo_db_num_groups, int total_size_grad_weights, int total_size_grad_biases)
 	{
-		mamba_layers[0]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_strategist.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
-		mamba_layers[1]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_tactic.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
-		mamba_layers[2]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_executor.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
+		mamba_layers[0]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_1.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
+		mamba_layers[1]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_2.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
+		mamba_layers[2]->initData(isLoaded, (std::filesystem::path(dir_path) / "mamba_3.bin").string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr, dev_side_ptr_weights, dev_side_ptr_biases, is_in_inference, &meta_adapted_data, &meta_adapted_offsets, total_size_grad_weights, total_size_grad_biases);
 		buffer_a.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_a), pipo_db_num_groups << 2, MemoryType::Device);
 		buffer_a_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_a_scales), pipo_db_num_groups, MemoryType::Device);
 		buffer_b.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_b), pipo_db_num_groups << 2, MemoryType::Device);

@@ -46,13 +46,13 @@ public:
 			  int* total_size_grad_weights, int* total_size_grad_biases, cudaStream_t stream_bwd, float learningRate, float penalty,
 			  size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count, bool is_activation_disabled = false) :
 		is_dw(kernelSize > 1 && (kernelSize & 1) == 1), disable_activation(is_activation_disabled),
-		in_channels(inChannels), out_channels(outChannels), kernel_size(kernelSize), stride(str_ide), dimension_in(in_dimension), dimension_out(out_dimension),
+		in_channels(inChannels), out_channels(outChannels),
+		kernel_size(kernelSize), stride(str_ide),
+		dimension_in(in_dimension), dimension_out(out_dimension),
 		real_size_weight(in_channels * kernel_size * kernel_size * (is_dw ? 1 : out_channels)),
 		num_groups(real_size_weight >> 5),
-		stream_forward(stream_fwd),
-		stream_backward(stream_bwd),
-		learning_rate(learningRate),
-		f_penalty(penalty)
+		stream_forward(stream_fwd), stream_backward(stream_bwd),
+		learning_rate(learningRate), f_penalty(penalty)
 	{
 		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
 		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
@@ -79,14 +79,20 @@ public:
 		{
 			grad_weights.resize(reinterpret_cast<float*>(dev_side_ptr_weights), total_size_grad_weights, MemoryType::Device);
 			grad_biases.resize(reinterpret_cast<float*>(dev_side_ptr_biases), total_size_grad_biases, MemoryType::Device);
-			**meta_adapted_data = master_weights.data();
-			(*meta_adapted_data) += 1;
-			**meta_adapted_data = biases.data();
-			(*meta_adapted_data) += 1;
-			**meta_adapted_offsets = real_size_weight;
-			(*meta_adapted_offsets) += 1;
-			**meta_adapted_offsets = out_channels;
-			(*meta_adapted_offsets) += 1;
+			if (meta_adapted_data)
+			{
+				**meta_adapted_data = master_weights.data();
+				(*meta_adapted_data) += 1;
+				**meta_adapted_data = biases.data();
+				(*meta_adapted_data) += 1;
+			}
+			if (meta_adapted_offsets)
+			{
+				**meta_adapted_offsets = real_size_weight;
+				(*meta_adapted_offsets) += 1;
+				**meta_adapted_offsets = out_channels;
+				(*meta_adapted_offsets) += 1;
+			}
 		}
 		if (isLoaded) loadFromFile(dir_path);
 		else
@@ -126,6 +132,8 @@ public:
 				{
 					case 2:  LAUNCH_CONV_DENSE_FWD_KERNEL(true, 2); break;
 					case 4:  LAUNCH_CONV_DENSE_FWD_KERNEL(true, 4); break;
+					case 8:  LAUNCH_CONV_DENSE_FWD_KERNEL(true, 8); break;
+					case 16:  LAUNCH_CONV_DENSE_FWD_KERNEL(true, 16); break;
 					default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 				}
 			}
@@ -135,6 +143,8 @@ public:
 				{
 					case 2:  LAUNCH_CONV_DENSE_FWD_KERNEL(false, 2); break;
 					case 4:  LAUNCH_CONV_DENSE_FWD_KERNEL(false, 4); break;
+					case 8:  LAUNCH_CONV_DENSE_FWD_KERNEL(false, 8); break;
+					case 16:  LAUNCH_CONV_DENSE_FWD_KERNEL(false, 16); break;
 					default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 				}
 			}
@@ -163,7 +173,7 @@ public:
 				case 3:  LAUNCH_CONV_BWD_KERNEL(3); break;
 				case 5:  LAUNCH_CONV_BWD_KERNEL(5); break;
 				case 7:  LAUNCH_CONV_BWD_KERNEL(7); break;
-				default: throw std::runtime_error("Unsupported kernel size: " + kernel_size); break;
+				default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 			}
 			#undef LAUNCH_CONV_BWD_KERNEL
 		}
@@ -182,6 +192,8 @@ public:
 				{
 					case 2:  LAUNCH_CONV_DENSE_BWD_KERNEL(true, 2); break;
 					case 4:  LAUNCH_CONV_DENSE_BWD_KERNEL(true, 4); break;
+					case 8:  LAUNCH_CONV_DENSE_BWD_KERNEL(true, 8); break;
+					case 16:  LAUNCH_CONV_DENSE_BWD_KERNEL(true, 16); break;
 					default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 				}
 			}
@@ -191,6 +203,8 @@ public:
 				{
 					case 2:  LAUNCH_CONV_DENSE_BWD_KERNEL(false, 2); break;
 					case 4:  LAUNCH_CONV_DENSE_BWD_KERNEL(false, 4); break;
+					case 8:  LAUNCH_CONV_DENSE_BWD_KERNEL(false, 8); break;
+					case 16:  LAUNCH_CONV_DENSE_BWD_KERNEL(false, 16); break;
 					default: throw std::runtime_error("Unsupported kernel size: " + std::to_string(kernel_size)); break;
 				}
 			}

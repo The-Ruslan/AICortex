@@ -44,8 +44,8 @@ bool msgOnPause(Cortex* cortex, HWND& hwnd, std::atomic<float>& isScored, std::m
 	std::cout << "\n================================================================\n";
 	gpuGuard.resetFrequency();
 	std::cout << " Press [0] to pause switching.\n";
-	std::cout << " Press [1] to exit with no data.\n";
-	std::cout << " Press [2] to exit with data.\n";
+	std::cout << " Press [1] to exit without saving data.\n";
+	std::cout << " Press [2] to exit with saving data.\n";
 	std::cout << " Press [3] to save data.\n";
 	std::cout << " Press [4] to load data.\n";
 	std::cout << " Press [5] to set a score if mode is train.\n";
@@ -343,14 +343,11 @@ int main()
 			case '7':
 				std::cout << "================================================================\n";
 				std::cout << " Author: _mrExecutor_\n";
-				std::cout << " Models used:\n";
-				std::cout << "  - Google Gemini 3 (fast version)\n";
-				std::cout << "  - Local model\n";
 				std::cout << "----------------------------------------------------------------\n";
 				std::cout << " [NOTE]\n";
 				std::cout << "  * AI-powered development.\n";
 				std::cout << "  * Written by AI, saved from a disaster by a human enthusiast.\n";
-				std::cout << "  * Core rewritten globally about 4 times. LoL.\n";
+				std::cout << "  * Core rewritten globally about 5 times. LoL.\n";
 				std::cout << "================================================================\n";
 				option = "";
 				break;
