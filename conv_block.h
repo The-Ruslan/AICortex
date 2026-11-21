@@ -4,7 +4,7 @@
 class ConvBlock
 {
 private:
-	const int input_channels, middle_channels, output_channels, input_dimension, final_dimension;
+	const int in_channels, mid_channels, out_channels, dimension_in, dimension_out;
 	cudaStream_t stream_forward, stream_backward;
 	int *pipo_db, *pipo_db_num_groups;
 	const float survival_prob_inv, residual_factor;
@@ -27,32 +27,26 @@ public:
 		conv_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "conv_layer2.bin").string());
 		conv_layers[3]->loadFromFile((std::filesystem::path(pathFile) / "residual_layer.bin").string());
 	}
-	ConvBlock(int in_channels, int mid_channels, int out_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
-			  int* total_size_grad_weights, int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups,
-			  int kernel_size_dw, float survival_probability, float res_factor, cudaStream_t stream_bwd, float learning_rate, float penalty,
+	ConvBlock(int input_channels, int middle_channels, int output_channels, int stride, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
+			  int* total_size_grad_weights, int* total_size_grad_biases, int* db_pipo, int* db_pipo_num_groups, int kernel_size_dw,
+			  float survival_probability, float res_factor, cudaStream_t stream_bwd, float learning_rate, float penalty,
 			  size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count) :
-		input_channels(in_channels),
-		middle_channels(mid_channels),
-		output_channels(out_channels),
-		input_dimension(in_dimension),
-		final_dimension(out_dimension),
-		stream_forward(stream_fwd),
-		stream_backward(stream_bwd),
-		pipo_db(db_pipo),
-		pipo_db_num_groups(db_pipo_num_groups),
-		survival_prob_inv(1.0f / survival_probability),
-		residual_factor(res_factor)
+		in_channels(input_channels), mid_channels(middle_channels), out_channels(output_channels),
+		dimension_in(in_dimension), dimension_out(out_dimension),
+		stream_forward(stream_fwd), stream_backward(stream_bwd),
+		pipo_db(db_pipo), pipo_db_num_groups(db_pipo_num_groups),
+		survival_prob_inv(1.0f / survival_probability), residual_factor(res_factor)
     {
-		const int local_pipo_db = middle_channels * final_dimension * final_dimension,
+		const int local_pipo_db = mid_channels * dimension_out * dimension_out,
 				  local_pipo_db_num_groups = local_pipo_db >> 5,
-				  final_stride = input_dimension == final_dimension ? 1 : stride;
+				  final_stride = dimension_in == dimension_out ? 1 : stride;
 		*pipo_db = *pipo_db < local_pipo_db ? local_pipo_db : *pipo_db;
 		*pipo_db_num_groups = *pipo_db_num_groups < local_pipo_db_num_groups ? local_pipo_db_num_groups : *pipo_db_num_groups;
 		conv_layers.reserve(4);
-		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, input_channels, kernel_size_dw, final_stride, input_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
-		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, middle_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, false));
-		conv_layers.push_back(std::make_unique<ConvLayer>(middle_channels, output_channels, 1, 1, final_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
-		conv_layers.push_back(std::make_unique<ConvLayer>(input_channels, output_channels, final_stride, final_stride, input_dimension, final_dimension, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
+		conv_layers.push_back(std::make_unique<ConvLayer>(in_channels, in_channels, kernel_size_dw, final_stride, dimension_in, dimension_out, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
+		conv_layers.push_back(std::make_unique<ConvLayer>(in_channels, mid_channels, 1, 1, dimension_out, dimension_out, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, false));
+		conv_layers.push_back(std::make_unique<ConvLayer>(mid_channels, out_channels, 1, 1, dimension_out, dimension_out, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
+		conv_layers.push_back(std::make_unique<ConvLayer>(in_channels, out_channels, final_stride, final_stride, dimension_in, dimension_out, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, true));
 	}
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float**& meta_adapted_data, size_t*& meta_adapted_offsets, uint8_t*& dev_side_ptr_grad_buffer_a, uint8_t*& dev_side_ptr_grad_buffer_b, uint8_t*& dev_side_ptr_grad_residual, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, int total_size_grad_weights, int total_size_grad_biases)
 	{
@@ -77,16 +71,16 @@ public:
 		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data());
 		conv_layers[2]->forward(buffer_b.data(), buffer_b_scales.data(), buffer_a.data(), buffer_a_scales.data());
 		conv_layers[3]->forward(input, input_scales, buffer_b.data(), buffer_b_scales.data());
-		dim3 blocks_grid(final_dimension, final_dimension);
-		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, output_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, output_channels, final_dimension, train_mode && is_survived ? survival_prob_inv : 1.0f, train_mode && !is_survived, residual_factor);
+		dim3 blocks_grid(dimension_out, dimension_out);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, blocks_grid, gpu_block_threads, out_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data(), output, output_scales, out_channels, dimension_out, train_mode && is_survived ? survival_prob_inv : 1.0f, train_mode && !is_survived, residual_factor);
 	}
 	void backward(universal_vector<float>& grad_input_output, const uint32_t* input, const int8_t* input_scales, bool is_survived = true)
 	{
 		conv_layers[0]->forward(input, input_scales, buffer_a.data(), buffer_a_scales.data());
 		conv_layers[1]->forward(buffer_a.data(), buffer_a_scales.data(), buffer_b.data(), buffer_b_scales.data());
-		dim3 blocks_grid(final_dimension, final_dimension);
+		dim3 blocks_grid(dimension_out, dimension_out);
 		checkCudaError(cudaStreamSynchronize(stream_forward));
-		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), output_channels, final_dimension, is_survived ? survival_prob_inv : 1.0f, residual_factor);
+		LAUNCH_KERNEL(residualAddBwdKernel<>, blocks_grid, gpu_block_threads, 0, stream_backward, grad_input_output.data(), grad_residual.data(), out_channels, dimension_out, is_survived ? survival_prob_inv : 1.0f, residual_factor);
 		if (is_survived)
 		{
 			conv_layers[2]->backward(grad_input_output.data(), buffer_b.data(), buffer_b_scales.data(), grad_buffer_b.data());
@@ -97,7 +91,7 @@ public:
 		auto* __restrict__ raw_target = grad_input_output.data();
 		const auto* __restrict__ raw_a = grad_buffer_b.data();
 		constexpr int elements_per_uint4 = sizeof(uint4) / sizeof(float);
-		grad_input_output.for_each_n(input_channels * input_dimension * input_dimension / elements_per_uint4, [raw_target, raw_a] __device__ (size_t i) 
+		grad_input_output.for_each_n(in_channels * dimension_in * dimension_in / elements_per_uint4, [raw_target, raw_a] __device__ (size_t i) 
 		{
 			const size_t offset = i * elements_per_uint4;
 			float local_target[elements_per_uint4], local_a[elements_per_uint4];

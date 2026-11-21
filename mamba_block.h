@@ -4,7 +4,7 @@
 class MambaBlock
 {
 private:
-	const int input_channels, output_channels;
+	const int in_channels, out_channels;
 	cudaStream_t stream_forward, stream_backward;
 	const float survival_prob_inv, residual_factor;
 	std::vector<std::unique_ptr<MambaLayer>> mamba_layers;
@@ -25,20 +25,17 @@ public:
 		mamba_layers[1]->loadFromFile((std::filesystem::path(pathFile) / "mamba_2.bin").string());
 		mamba_layers[2]->loadFromFile((std::filesystem::path(pathFile) / "mamba_3.bin").string());
 	}
-	MambaBlock(int in_channels, int out_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
+	MambaBlock(int input_channels, int output_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
 			   float survival_probability, float res_factor, cudaStream_t stream_bwd, float learning_rate, float penalty,
 			   size_t* total_mem_main_device, size_t* total_mem_main_host, size_t* total_learnable_data, size_t* total_learnable_data_count, int activation_type = 2) :
-		input_channels(in_channels),
-		output_channels(out_channels),
-		stream_forward(stream_fwd),
-		stream_backward(stream_bwd),
-		survival_prob_inv(1.0f / survival_probability),
-		residual_factor(res_factor)
+		in_channels(input_channels), out_channels(output_channels),
+		stream_forward(stream_fwd), stream_backward(stream_bwd),
+		survival_prob_inv(1.0f / survival_probability), residual_factor(res_factor)
     {
 		mamba_layers.reserve(3);
-		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
-		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, input_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
-		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, output_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, activation_type));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, in_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, in_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, 1));
+		mamba_layers.push_back(std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learning_rate, penalty, total_mem_main_device, total_mem_main_host, total_learnable_data, total_learnable_data_count, activation_type));
 	}
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float**& meta_adapted_data, size_t*& meta_adapted_offsets, uint8_t*& dev_side_ptr_grad_buffer_a, uint8_t*& dev_side_ptr_grad_residual, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, int pipo_db_num_groups, int total_size_grad_weights, int total_size_grad_biases)
 	{
@@ -51,8 +48,8 @@ public:
 		buffer_b_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_b_scales), pipo_db_num_groups, MemoryType::Device);
 		if (!is_in_inference)
 		{
-			grad_buffer_a.resize(reinterpret_cast<float*>(dev_side_ptr_grad_buffer_a), input_channels, MemoryType::Device);
-			grad_residual.resize(reinterpret_cast<float*>(dev_side_ptr_grad_residual), input_channels, MemoryType::Device);
+			grad_buffer_a.resize(reinterpret_cast<float*>(dev_side_ptr_grad_buffer_a), in_channels, MemoryType::Device);
+			grad_residual.resize(reinterpret_cast<float*>(dev_side_ptr_grad_residual), in_channels, MemoryType::Device);
 		}
 	}
     void forward(const uint32_t* input, const int8_t* input_scales, bool on_training = true, int add_seed = 1234, bool is_survived = true)
@@ -62,7 +59,7 @@ public:
 		const int grid_dim1 = ((total_elements1 >> 5) + gpu_block_threads - 1) / gpu_block_threads;
 		if (on_training) LAUNCH_KERNEL((quantizeKernel<float, false>), grid_dim1, gpu_block_threads, 0, stream_forward, mamba_layers[0]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements1, add_seed);
 		else LAUNCH_KERNEL((quantizeKernel<float, true>), grid_dim1, gpu_block_threads, 0, stream_forward, mamba_layers[0]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements1, 0);
-		LAUNCH_KERNEL(residualAddFwdKernel<>, 1, gpu_block_threads, input_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), input, input_scales, buffer_b.data(), buffer_b_scales.data(), input_channels, 1, on_training && is_survived ? survival_prob_inv : 1.0f, on_training && !is_survived, residual_factor);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, 1, gpu_block_threads, in_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), input, input_scales, buffer_b.data(), buffer_b_scales.data(), in_channels, 1, on_training && is_survived ? survival_prob_inv : 1.0f, on_training && !is_survived, residual_factor);
 		mamba_layers[1]->forward(buffer_b.data(), buffer_b_scales.data());
 		const int total_elements2 = mamba_layers[1]->get_output().size();
 		const int grid_dim2 = ((total_elements2 >> 5) + gpu_block_threads - 1) / gpu_block_threads;
@@ -75,21 +72,21 @@ public:
 		mamba_layers[0]->forward(input, input_scales);
 		const int total_elements1 = mamba_layers[0]->get_output().size();
 		LAUNCH_KERNEL((quantizeKernel<float, false>), ((total_elements1 >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, mamba_layers[0]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements1, add_seed);
-		LAUNCH_KERNEL(residualAddFwdKernel<>, 1, gpu_block_threads, input_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), input, input_scales, buffer_b.data(), buffer_b_scales.data(), input_channels, 1, is_survived ? survival_prob_inv : 1.0f, !is_survived, residual_factor);
+		LAUNCH_KERNEL(residualAddFwdKernel<>, 1, gpu_block_threads, in_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), input, input_scales, buffer_b.data(), buffer_b_scales.data(), in_channels, 1, is_survived ? survival_prob_inv : 1.0f, !is_survived, residual_factor);
 		mamba_layers[1]->forward(buffer_b.data(), buffer_b_scales.data());
 		const int total_elements2 = mamba_layers[1]->get_output().size();
 		LAUNCH_KERNEL((quantizeKernel<float, false>), ((total_elements2 >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, mamba_layers[1]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements2, add_seed);
 		checkCudaError(cudaStreamSynchronize(stream_forward));
 		mamba_layers[2]->backward(grad_output, buffer_a.data(), buffer_a_scales.data(), grad_buffer_a);
 		mamba_layers[1]->backward(grad_buffer_a.data(), buffer_b.data(), buffer_b_scales.data(), grad_residual);
-		LAUNCH_KERNEL(residualAddBwdKernel<>, 1, gpu_block_threads, 0, stream_backward, grad_residual.data(), grad_input.data(), input_channels, 1, is_survived ? survival_prob_inv : 1.0f, residual_factor);
+		LAUNCH_KERNEL(residualAddBwdKernel<>, 1, gpu_block_threads, 0, stream_backward, grad_residual.data(), grad_input.data(), in_channels, 1, is_survived ? survival_prob_inv : 1.0f, residual_factor);
 		if (is_survived)
 		{
 			mamba_layers[0]->backward(grad_residual.data(), input, input_scales, grad_buffer_a);
 			auto* __restrict__ raw_target = grad_input.data();
 			const auto* __restrict__ raw_a = grad_buffer_a.data();
 			constexpr int elements_per_uint4 = sizeof(uint4) / sizeof(float);
-			grad_input.for_each_n(input_channels / elements_per_uint4, [raw_target, raw_a] __device__ (size_t i) 
+			grad_input.for_each_n(in_channels / elements_per_uint4, [raw_target, raw_a] __device__ (size_t i) 
 			{
 				const size_t offset = i * elements_per_uint4;
 				float local_target[elements_per_uint4], local_a[elements_per_uint4];
