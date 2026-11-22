@@ -34,7 +34,7 @@ The AI utilizes a hybrid approach for analysis and decision-making:
 4. **RL by user actions and critic evaluations** — Training based on human actions, but evaluated by an internal critic model.
 5. **RL by AI actions and critic evaluations** — Fully autonomous mode (the AI acts independently, and the critic evaluates the actions).
 
-Manual user feedback for AI: arrow UP is +1 score, DOWN is -1, LEFT is -0.5 and RIGHT is +0.5 score.
+Manual user feedback for AI: keybinds.txt and rewards.txt.
 To pause AI work press ESC.
 
 ## 📋 System Requirements
