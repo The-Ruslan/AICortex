@@ -69,11 +69,11 @@ public:
 	}
 	void backward(const float* grad_output, const uint32_t* input, const int8_t* input_scales, universal_vector<float>& grad_input, int add_seed = 1234, bool is_survived = true)
 	{
-		mamba_layers[0]->forward(input, input_scales);
+		mamba_layers[0]->forward(input, input_scales, false);
 		const int total_elements1 = mamba_layers[0]->get_output().size();
 		LAUNCH_KERNEL((quantizeKernel<float, false>), ((total_elements1 >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, mamba_layers[0]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements1, add_seed);
 		LAUNCH_KERNEL(residualAddFwdKernel<>, 1, gpu_block_threads, in_channels * sizeof(float), stream_forward, buffer_a.data(), buffer_a_scales.data(), input, input_scales, buffer_b.data(), buffer_b_scales.data(), in_channels, 1, is_survived ? survival_prob_inv : 1.0f, !is_survived, residual_factor);
-		mamba_layers[1]->forward(buffer_b.data(), buffer_b_scales.data());
+		mamba_layers[1]->forward(buffer_b.data(), buffer_b_scales.data(), false);
 		const int total_elements2 = mamba_layers[1]->get_output().size();
 		LAUNCH_KERNEL((quantizeKernel<float, false>), ((total_elements2 >> 5) + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, stream_forward, mamba_layers[1]->get_output().data(), buffer_a.data(), buffer_a_scales.data(), total_elements2, add_seed);
 		checkCudaError(cudaStreamSynchronize(stream_forward));

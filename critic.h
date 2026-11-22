@@ -83,8 +83,9 @@ public:
 	void backward(const float* real_score, const uint32_t* input, const int8_t* input_scales, universal_vector<float>& grad_input)
 	{
 		score_real.copy(real_score, 0, out_channels, 0, out_channels, stream_backward);
+		int grad_mask = conv_layers.size() & 1, mask = 0;
 		const float* real_score_ptr = score_real.data();
-		auto* __restrict__ raw_target = grad_input.data();
+		auto* __restrict__ raw_target = grad_mask ? grad_input.data() : grad_buffer_a.data();
 		const auto* __restrict__ raw_score = evaluator->get_output().data();
 		grad_input.for_each_n(evaluator->get_output().size(), [raw_target, raw_score, real_score_ptr] __device__ (size_t i) 
 		{
@@ -92,7 +93,6 @@ public:
 		}, stream_backward);
 		const uint32_t* eval_input = input;
 		const int8_t* eval_input_scales = input_scales;
-		int mask = 0;
 		for (size_t i = 0; i < conv_layers.size(); i++)
 		{
 			mask = (mask + 1) & 1;
@@ -102,9 +102,9 @@ public:
 			eval_input = next_input;
 			eval_input_scales = next_scales;
 		}
-		int grad_mask = conv_layers.size() & 1;
+		const float* eval_grad_out = grad_mask ? grad_input.data() : grad_buffer_a.data();
 		checkCudaError(cudaStreamSynchronize(stream_forward));
-		evaluator->backward(grad_input.data(), eval_input, eval_input_scales, grad_mask ? grad_buffer_a : grad_input);
+		evaluator->backward(eval_grad_out, eval_input, eval_input_scales, grad_mask ? grad_buffer_a : grad_input);
 		for (int i = conv_layers.size() - 1; i >= 0; i--)
 		{
 			const uint32_t* layer_input = input;

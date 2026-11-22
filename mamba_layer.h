@@ -145,9 +145,10 @@ public:
 			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 		}
 	}
-	void forward(const uint32_t* input, const int8_t* input_scales)
+	void forward(const uint32_t* input, const int8_t* input_scales, bool update_state = true)
 	{
-		LAUNCH_KERNEL(mambaSSMFwdStateKernel<>, d_inner / gpu_block_threads, gpu_block_threads, 0, stream_forward, input, input_scales, weights.data(), weight_scales.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), y_ssm.data(), in_channels, d_inner);
+		if (update_state) LAUNCH_KERNEL(mambaSSMFwdStateKernel<true>, d_inner / gpu_block_threads, gpu_block_threads, 0, stream_forward, input, input_scales, weights.data(), weight_scales.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), y_ssm.data(), in_channels, d_inner);
+		else LAUNCH_KERNEL(mambaSSMFwdStateKernel<false>, d_inner / gpu_block_threads, gpu_block_threads, 0, stream_forward, input, input_scales, weights.data(), weight_scales.data(), h_states.data(), trace_A.data(), trace_B.data(), trace_Delta.data(), y_ssm.data(), in_channels, d_inner);
 		const int act_grid = (out_channels + gpu_block_threads - 1) / gpu_block_threads;
 		if (activation_type == 0) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<0>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels, d_inner);
 		else if (activation_type == 1) LAUNCH_KERNEL(mambaSSMFwdOutProjKernel<1>, act_grid, gpu_block_threads, 0, stream_forward, y_ssm.data(), weights.data(), weight_scales.data(), biases.data(), mamba_output.data(), out_channels, d_inner);

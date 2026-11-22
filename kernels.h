@@ -1077,7 +1077,7 @@ __global__ void __launch_bounds__(threads_per_block, 4) residualAddBwdKernel(flo
 		gn_ptr_v4[v_idx] = *reinterpret_cast<uint4*>(local_gn);
 	}
 }
-template <int threads_per_block = gpu_block_threads>
+template <bool update_state = true, int threads_per_block = gpu_block_threads>
 __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(const uint32_t* __restrict__ input, const int8_t* __restrict__ input_scales, const uint32_t* __restrict__ weights, const int8_t* __restrict__ weight_scales, float2* __restrict__ h_states, float2* __restrict__ trace_A, float2* __restrict__ trace_B, float2* __restrict__ trace_Delta, float* __restrict__ y_ssm_out, int InC, int d_inner)
 {
 	constexpr int num_warps = threads_per_block >> 5, mamba_cols = mamba_d_state >> 5;
@@ -1091,16 +1091,20 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(c
 	const int block_ch_idx = (blockIdx.x * num_warps + warp_id) << 5;
 	const int ch = block_ch_idx + lane_id;
 	const int in_ch_idx = ch & (InC - 1);
-	float2 h_l[mamba_cols], trA[mamba_cols], trB[mamba_cols], trDelta[mamba_cols];
+	float2 h_l[mamba_cols];
+	[[maybe_unused]] float2 trA[mamba_cols], trB[mamba_cols], trDelta[mamba_cols];
 	const int base_row_tr = ch * mamba_d_state, base_row_tr_lane_id = base_row_tr + lane_id;
 	#pragma unroll
 	for (int i = 0; i < mamba_cols; ++i)
 	{
 		const int idx = base_row_tr_lane_id + (i << 5);
 		h_l[i] = h_states[idx];
-		trA[i] = trace_A[idx];
-		trB[i] = trace_B[idx];
-		trDelta[i] = trace_Delta[idx];
+		if constexpr (update_state)
+		{
+			trA[i] = trace_A[idx];
+			trB[i] = trace_B[idx];
+			trDelta[i] = trace_Delta[idx];
+		}
 	}
 	float2 cached_raw_A[mamba_cols], cached_W_C[mamba_cols];
 	uint32_t raw_weights_ac[4];
@@ -1153,35 +1157,41 @@ __global__ void __launch_bounds__(threads_per_block, 2) mambaSSMFwdStateKernel(c
 		const float nre = fmaf(dt_half, are, 1.0f);
 		const float abr = fmaf(nre, ire, dim * iim);
 		const float abi = fmaf(nre, iim, -dim * ire);
-		const float dt_B_x = dt * B_x_mimo;
-		const float hr_old = h_l[c].x, hi_old = h_l[c].y;
-		h_l[c] = make_float2(fmaf(abr, hr_old, fmaf(-abi, hi_old, dt_B_x * ire)), fmaf(abr, hi_old, fmaf(abi, hr_old, dt_B_x * iim)));
-		const float i2_re = fmaf(ire, ire, -iim * iim);
-		const float i2_im = 2.0f * ire * iim;
-		const float za_re = fmaf(dt_half, B_x_mimo, hr_old);
-		const float dt_i2_za_re = dt * fmaf(i2_re, za_re, -i2_im * hi_old);
-		const float dt_i2_za_im = dt * fmaf(i2_re, hi_old, i2_im * za_re);
-		const float zdt_re = fmaf(are, hr_old, fmaf(-cached_raw_A[c].y, hi_old, B_x_mimo));
-		const float zdt_im = fmaf(are, hi_old, cached_raw_A[c].y * hr_old);
-		const float d_dt_re = fmaf(i2_re, zdt_re, -i2_im * zdt_im);
-		const float d_dt_im = fmaf(i2_re, zdt_im, i2_im * zdt_re);
-		trA[c] = make_float2(fmaf(abr, trA[c].x, fmaf(-abi, trA[c].y, dt_i2_za_re)), fmaf(abr, trA[c].y, fmaf(abi, trA[c].x, dt_i2_za_im)));
-		trB[c] = make_float2(fmaf(abr, trB[c].x, fmaf(-abi, trB[c].y, dt * ire)), fmaf(abr, trB[c].y, fmaf(abi, trB[c].x, dt * iim)));
-		trDelta[c] = make_float2(fmaf(abr, trDelta[c].x, fmaf(-abi, trDelta[c].y, d_dt_re)), fmaf(abr, trDelta[c].y, fmaf(abi, trDelta[c].x, d_dt_im)));
+		if constexpr (update_state)
+		{
+			const float dt_B_x = dt * B_x_mimo;
+			const float hr_old = h_l[c].x, hi_old = h_l[c].y;
+			h_l[c] = make_float2(fmaf(abr, hr_old, fmaf(-abi, hi_old, dt_B_x * ire)), fmaf(abr, hi_old, fmaf(abi, hr_old, dt_B_x * iim)));
+			const float i2_re = fmaf(ire, ire, -iim * iim);
+			const float i2_im = 2.0f * ire * iim;
+			const float za_re = fmaf(dt_half, B_x_mimo, hr_old);
+			const float dt_i2_za_re = dt * fmaf(i2_re, za_re, -i2_im * hi_old);
+			const float dt_i2_za_im = dt * fmaf(i2_re, hi_old, i2_im * za_re);
+			const float zdt_re = fmaf(are, hr_old, fmaf(-cached_raw_A[c].y, hi_old, B_x_mimo));
+			const float zdt_im = fmaf(are, hi_old, cached_raw_A[c].y * hr_old);
+			const float d_dt_re = fmaf(i2_re, zdt_re, -i2_im * zdt_im);
+			const float d_dt_im = fmaf(i2_re, zdt_im, i2_im * zdt_re);
+			trA[c] = make_float2(fmaf(abr, trA[c].x, fmaf(-abi, trA[c].y, dt_i2_za_re)), fmaf(abr, trA[c].y, fmaf(abi, trA[c].x, dt_i2_za_im)));
+			trB[c] = make_float2(fmaf(abr, trB[c].x, fmaf(-abi, trB[c].y, dt * ire)), fmaf(abr, trB[c].y, fmaf(abi, trB[c].x, dt * iim)));
+			trDelta[c] = make_float2(fmaf(abr, trDelta[c].x, fmaf(-abi, trDelta[c].y, d_dt_re)), fmaf(abr, trDelta[c].y, fmaf(abi, trDelta[c].x, d_dt_im)));
+		}
 		y_acc_arr[c] = fmaf(h_l[c].x, cached_W_C[c].x, -h_l[c].y * cached_W_C[c].y);
 	}
 	float y_acc = 0.0f;
 	#pragma unroll
 	for (int c = 0; c < mamba_cols; ++c) y_acc += y_acc_arr[c];
 	y_ssm_out[ch] = fmaf(dequantize_scalar(weight_u32_d, off_D_ch & 7, weight_scale_d), x_local, y_acc);
-	#pragma unroll
-	for (int i = 0; i < mamba_cols; ++i)
+	if constexpr (update_state)
 	{
-		const int idx = base_row_tr_lane_id + (i << 5);
-		h_states[idx] = h_l[i];
-		trace_A[idx] = trA[i];
-		trace_B[idx] = trB[i];
-		trace_Delta[idx] = trDelta[i];
+		#pragma unroll
+		for (int i = 0; i < mamba_cols; ++i)
+		{
+			const int idx = base_row_tr_lane_id + (i << 5);
+			h_states[idx] = h_l[i];
+			trace_A[idx] = trA[i];
+			trace_B[idx] = trB[i];
+			trace_Delta[idx] = trDelta[i];
+		}
 	}
 }
 template <int activation_type = 1, int channels_per_block = gpu_block_threads>
