@@ -35,7 +35,10 @@ The AI utilizes a hybrid approach for analysis and decision-making:
 5. **RL by AI actions and critic evaluations** — Fully autonomous mode (the AI acts independently, and the critic evaluates the actions).
 
 Manual user feedback for AI: keybinds.txt and rewards.txt.
+
 To pause AI work press ESC.
+
+To ensure stable operation, I recommend entering a value of 1500+ MHz into the corresponding field in the application.
 
 ## 📋 System Requirements
 
