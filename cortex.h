@@ -123,6 +123,16 @@ private:
 		return getFastRandomFloatBoundedUniform(generateUniqueSeed(), 1.0f) < survival_prob;
     }
 	int fps, pipo_db = 0, pipo_db_num_groups = 0;
+	const std::string dir_path;
+	std::atomic<E_Workmode> &work_mode;
+	std::atomic<bool> &isEliminating, &is_inputing;
+	std::atomic<float> &isScored;
+	std::mutex &mtx_exp, &mtx_running;
+	std::condition_variable &cv_exp, &cv_running;
+	bool &exp_add, ready_to_receive_exp = false, &is_running;
+	const bool enabled_autosave_autoload = false;
+	std::vector<uint8_t> &keybinds;
+	float learning_rate;
 	S_Experience exp;
 	std::unique_ptr<ConvLayer> patcher;
 	std::vector<std::unique_ptr<ConvBlock>> conv_blocks;
@@ -143,16 +153,7 @@ private:
 	universal_vector<action_type> action_ptr, action_prevs;
 	universal_vector<float*> meta_adapted_data;
 	universal_vector<size_t> meta_adapted_offsets, meta_global_offsets;
-	const std::string dir_path;
     std::thread addExpThread;
-	std::atomic<E_Workmode> &work_mode;
-	std::atomic<bool> &isEliminating, &is_inputing;
-	std::atomic<float> &isScored;
-	std::mutex &mtx_exp, &mtx_running;
-	std::condition_variable &cv_exp, &cv_running;
-	bool &exp_add, ready_to_receive_exp = false, &is_running, ready_to_update = false;
-	std::vector<uint8_t> &keybinds;
-	float learning_rate;
 	E_BackwardStrategy next_backward_strategy = E_BackwardStrategy::STANDARD;
 	std::atomic<bool> exp_is_dirty{false};
 	void executeActions()
@@ -269,7 +270,6 @@ private:
 	void distributeNetworkData() { for (size_t i = 0; i < meta_adapted_data.size(); ++i) checkCudaError(cudaMemcpyAsync(meta_adapted_data[i], meta_backup_data.data() + meta_global_offsets[i], meta_adapted_offsets[i] * sizeof(float), cudaMemcpyDefault, stream_backward.get())); }
 	void performBackwardStep(float score, int epoch)
 	{
-		grad_input.fill(0, grad_input.size(), 0, stream_backward.get());
 		const float entropy_sum = mamba_block->get_output().transform_reduce<float>(EntropyOP<float>{}, mamba_block->get_output().size(), stream_backward.get()) / mamba_block->get_output().size();
 		score = fmaf(entropy_sum, fmaxf(0.001f, 0.01f * powf(0.999f, static_cast<float>(epoch))), score) * score_gamma;
 		grad_output.for_each_n(grad_output.size(), BackwardStepOP<>{grad_output.data(), mamba_block->get_output().data(), action_ptr.data(), score}, stream_backward.get());
@@ -401,6 +401,7 @@ private:
 		hall_of_shame->getEntries(shame_experiences);
 		const size_t num_sequences = shame_experiences.size() / meta_seq_len;
 		if (num_sequences < 1) return;
+		std::cout << "[SYSTEM LOG] " << num_sequences << " detected." << std::endl;
 		collectNetworkData();
 		meta_gradient_sum.fill(0, meta_gradient_sum.size(), 0, stream_backward.get());
 		for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx)
@@ -437,6 +438,7 @@ private:
 		hall_of_shame->getEntries(shame_experiences);
 		const size_t num_sequences = shame_experiences.size() / meta_seq_len;
 		if (num_sequences < 1) return;
+		std::cout << "[SYSTEM LOG] " << num_sequences << " detected." << std::endl;
 		for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx)
 		{
 			mamba_block->reset(stream_backward.get());
@@ -508,18 +510,17 @@ public:
 	{
 		{
 			std::unique_lock<std::mutex> lock(mtx_running);
-			ready_to_update = true;
-			cv_running.wait(lock, [this] { return !is_running || isEliminating.load(std::memory_order_acquire); });
-			ready_to_update = false;
+			is_running = false;
+			cv_running.notify_all();
 		}
-		constexpr int max_retries = 25;
+		constexpr int max_retries = 50;
 		int attempt = 0;
 		bool success = false;
 		while (!success && attempt < max_retries)
 		{
 			try 
 			{
-				patcher->saveToFile((std::filesystem::path(dir_path) / "patcher_layer").string());
+				patcher->saveToFile((std::filesystem::path(dir_path) / "patcher_layer.bin").string());
 				for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->saveToFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
 				mamba_block->saveToFile((std::filesystem::path(dir_path) / "mambas").string());
 				if (critic) critic->saveToFile((std::filesystem::path(dir_path) / "critic.bin").string());
@@ -530,7 +531,7 @@ public:
 			{
 				attempt++;
 				std::cout << "[WARNING] Network file is locked by another PC. Retrying save (" << attempt << "/" << max_retries << ")..." << std::endl;
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+				std::this_thread::sleep_for(std::chrono::milliseconds(25));
 			}
 		}
 		std::unique_lock<std::mutex> lock(mtx_running);
@@ -541,9 +542,8 @@ public:
 	{
 		{
 			std::unique_lock<std::mutex> lock(mtx_running);
-			ready_to_update = true;
-			cv_running.wait(lock, [this] { return !is_running || isEliminating.load(std::memory_order_acquire); });
-			ready_to_update = false;
+			is_running = false;
+			cv_running.notify_all();
 		}
 		constexpr int max_retries = 50;
 		int attempt = 0;
@@ -552,7 +552,7 @@ public:
 		{
 			try 
 			{
-				patcher->loadFromFile((std::filesystem::path(dir_path) / "patcher_layer").string());
+				patcher->loadFromFile((std::filesystem::path(dir_path) / "patcher_layer.bin").string());
 				for (int i = 0; i < conv_blocks.size(); i++) conv_blocks[i]->loadFromFile((std::filesystem::path(dir_path) / std::to_string(i)).string());
 				mamba_block->loadFromFile((std::filesystem::path(dir_path) / "mambas").string());
 				if (critic) critic->loadFromFile((std::filesystem::path(dir_path) / "critic.bin").string());
@@ -563,17 +563,19 @@ public:
 			{
 				attempt++;
 				std::cout << "[WARNING] Network file is busy (writing in progress). Retrying load (" << attempt << "/" << max_retries << ")..." << std::endl;
-				std::this_thread::sleep_for(std::chrono::milliseconds(300));
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			}
 		}
 		std::unique_lock<std::mutex> lock(mtx_running);
 		is_running = true;
 		cv_running.notify_all();
 	}
-	Cortex(bool isLoaded, std::string process_conf_path, std::atomic<E_Workmode>& working_mode, std::atomic<bool>& is_eliminating, std::atomic<float>& is_scored,
+	Cortex(bool isLoaded, std::string process_conf_path, std::atomic<E_Workmode>& working_mode,
+		   std::atomic<bool>& is_eliminating, std::atomic<float>& is_scored,
 		   std::mutex& mtxExp, std::mutex& mtxRunning,
 		   std::condition_variable& cvExp, std::condition_variable& cvRunning,
 		   bool& expAdd, bool& isRunning, std::atomic<bool>& isInputing, std::vector<uint8_t>& key_binds,
+		   bool autosave_autoload_enabled = false,
 		   size_t computationSpeed = 30,
 		   float learningRate = 0.0001f,
 		   size_t exp_buffer_size_total = meta_seq_len * meta_seq_len) :
@@ -583,6 +585,7 @@ public:
 		mtx_exp(mtxExp), mtx_running(mtxRunning),
 		cv_exp(cvExp), cv_running(cvRunning),
 		exp_add(expAdd), is_running(isRunning),
+		enabled_autosave_autoload(autosave_autoload_enabled),
 		keybinds(key_binds), learning_rate(learningRate)
 	{
 		cudaStream_t temp_stream_fwd, temp_stream_bwd, temp_stream_exp;
@@ -747,11 +750,6 @@ public:
 		{
 			{
 				std::unique_lock<std::mutex> lock(mtx_running);
-				if (ready_to_update)
-				{
-					is_running = false;
-					cv_running.notify_all();
-				}
 				cv_running.wait(lock, [this] { return is_running || isEliminating.load(std::memory_order_acquire); });
 				if (isEliminating.load(std::memory_order_acquire)) break;
 			}
@@ -772,26 +770,29 @@ public:
 					epoch++;
 				}
 				else isScored.store(fminimum, std::memory_order_relaxed);
-				if (score > epsilon)
+				if (enabled_autosave_autoload)
 				{
-					winCount++;
-					looseCount = std::max(0, looseCount - 1);
-					if (winCount >= maxCount)
+					if (score > epsilon)
 					{
-						saveToFile();
-						winCount = 0;
-						looseCount = 0;
+						winCount++;
+						looseCount = std::max(0, looseCount - 1);
+						if (winCount >= maxCount)
+						{
+							saveToFile();
+							winCount = 0;
+							looseCount = 0;
+						}
 					}
-				}
-				else if (score < -epsilon)
-				{
-					looseCount++;
-					winCount = std::max(0, winCount - 1);
-					if (looseCount >= maxCount)
+					else if (score < -epsilon)
 					{
-						loadFromFile();
-						winCount = 0;
-						looseCount = 0;
+						looseCount++;
+						winCount = std::max(0, winCount - 1);
+						if (looseCount >= maxCount)
+						{
+							loadFromFile();
+							winCount = 0;
+							looseCount = 0;
+						}
 					}
 				}
 			}

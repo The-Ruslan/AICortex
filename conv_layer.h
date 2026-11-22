@@ -20,27 +20,23 @@ public:
 		std::ofstream file(pathFile, std::ios::binary);
 		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for writing: " + pathFile);
 		universal_vector<float> biases_tmp(out_channels, MemoryType::PinnedHost);
-		checkCudaError(cudaStreamSynchronize(stream_backward));
-		checkCudaError(cudaStreamSynchronize(stream_forward));
+		checkCudaError(cudaDeviceSynchronize());
 		biases_tmp.copy(biases, 0, out_channels, 0, out_channels, 0);
 		file.write(reinterpret_cast<const char*>(master_weights.data()), real_size_weight * sizeof(float));
 		file.write(reinterpret_cast<const char*>(biases_tmp.data()), out_channels * sizeof(float));
 		file.close();
-		checkCudaError(cudaStreamSynchronize(0));
 	}
 	void loadFromFile(std::string pathFile)
 	{
 		std::ifstream file(pathFile, std::ios::binary);
 		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for reading: " + pathFile);
 		universal_vector<float> biases_tmp(out_channels, MemoryType::PinnedHost);
-		checkCudaError(cudaStreamSynchronize(stream_backward));
-		checkCudaError(cudaStreamSynchronize(stream_forward));
+		checkCudaError(cudaDeviceSynchronize());
 		file.read(reinterpret_cast<char*>(master_weights.data()), real_size_weight * sizeof(float));
 		file.read(reinterpret_cast<char*>(biases_tmp.data()), out_channels * sizeof(float));
 		file.close();
 		biases.copy(biases_tmp, 0, out_channels, 0, out_channels, 0);
 		LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
-		checkCudaError(cudaStreamSynchronize(0));
 	}
 	ConvLayer(int inChannels, int outChannels, int kernelSize, int str_ide, int in_dimension, int out_dimension, cudaStream_t stream_fwd,
 			  int* total_size_grad_weights, int* total_size_grad_biases, cudaStream_t stream_bwd, float learningRate, float penalty,

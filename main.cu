@@ -349,6 +349,11 @@ int main()
 	option = "";
 	std::cout << "[MENU] Load saved data (y/n) >> ";
 	std::getline(std::cin, option);
+	const bool isLoaded = option == "y";
+	option = "";
+	std::cout << "[MENU] Enable autosave and autoload data during training (y/n) >> ";
+	std::getline(std::cin, option);
+	const bool autosave_autoload_enabled = option == "y";
 	HWND hwnd = GetConsoleWindow();
 	std::atomic<bool> isEliminating{false}, is_inputing{true};
 	std::atomic<float> isScored{fminimum};
@@ -388,7 +393,7 @@ int main()
 		}
 		file.close();
 	}
-	Cortex cortex(option == "y", process_conf_path, work_mode, isEliminating, isScored, mtx_exp, mtx_running, cv_exp, cv_running, exp_add, is_running, is_inputing, keybinds);
+	Cortex cortex(isLoaded, process_conf_path, work_mode, isEliminating, isScored, mtx_exp, mtx_running, cv_exp, cv_running, exp_add, is_running, is_inputing, keybinds, autosave_autoload_enabled);
 	if (msgOnPause(&cortex, hwnd, isScored, mtx_running, is_running, cv_running)) return 0;
 	std::thread inputThread = std::thread(inputUser, &cortex, std::ref(hwnd),
 										  std::ref(work_mode), std::ref(isEliminating), std::ref(isScored),
