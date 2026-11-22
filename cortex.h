@@ -772,7 +772,7 @@ public:
 					epoch++;
 				}
 				else isScored.store(fminimum, std::memory_order_relaxed);
-				if (score > 0.0f)
+				if (score > epsilon)
 				{
 					winCount++;
 					looseCount = std::max(0, looseCount - 1);
@@ -783,7 +783,7 @@ public:
 						looseCount = 0;
 					}
 				}
-				else
+				else if (score < -epsilon)
 				{
 					looseCount++;
 					winCount = std::max(0, winCount - 1);

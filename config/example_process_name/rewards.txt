@@ -1,0 +1,5 @@
+ArrowLeft=-0.5
+ArrowUp=1.0
+ArrowRight=0.5
+ArrowDown=-1.0
+SlashBack=0.0

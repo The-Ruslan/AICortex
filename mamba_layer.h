@@ -5,7 +5,8 @@ template <typename T>
 struct MambaWeightsOP
 {
 	T* ptr;
-	__host__ __device__ void operator()(size_t i) const { ptr[i] = static_cast<T>(-12.1f - 0.4f * (i & (mamba_d_state - 1)) / (mamba_d_state - 1)); }
+	const float base_a;
+	__host__ __device__ void operator()(size_t i) const { ptr[i] = static_cast<T>(-base_a - 0.4f * (i & (mamba_d_state - 1)) / (mamba_d_state - 1)); }
 };
 
 class MambaLayer
@@ -73,7 +74,7 @@ public:
 		if (total_learnable_data) *total_learnable_data = *total_learnable_data + real_size_weight + out_channels;
 		if (total_learnable_data_count) *total_learnable_data_count = *total_learnable_data_count + 2;
 	}
-	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& current_dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float*** meta_adapted_data, size_t** meta_adapted_offsets, int total_size_grad_weights, int total_size_grad_biases)
+	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& current_dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float*** meta_adapted_data, size_t** meta_adapted_offsets, int total_size_grad_weights, int total_size_grad_biases, float base_a_re)
 	{
 		size_t w_bytes = align16(out_channels * sizeof(float));
 		mamba_output.resize(reinterpret_cast<float*>(current_dev_main_ptr), out_channels, MemoryType::Device);
@@ -140,7 +141,7 @@ public:
 				}
 			}
 			const size_t off_A_re = d_inner + (d_inner << 5) + h_states_size + h_states_size, off_A_im = off_A_re + h_states_size;
-			master_weights.for_each_n(h_states_size, MambaWeightsOP<float>{master_weights.data() + off_A_re}, 0);
+			master_weights.for_each_n(h_states_size, MambaWeightsOP<float>{master_weights.data() + off_A_re, base_a_re}, 0);
 			master_weights.fill(off_A_im, off_A_im + h_states_size, 0.001f, 0);
 			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
 		}

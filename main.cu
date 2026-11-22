@@ -109,7 +109,8 @@ void inputUser(Cortex* cortex, HWND& hwnd,
 			   std::atomic<E_Workmode>& work_mode, std::atomic<bool>& isEliminating, std::atomic<float>& isScored,
 			   std::mutex& mtx_exp, std::mutex& mtx_running,
 			   std::condition_variable& cv_exp, std::condition_variable& cv_running,
-			   bool& exp_add, bool& is_running, std::atomic<bool>& is_inputing, std::vector<uint8_t>& keybinds)
+			   bool& exp_add, bool& is_running, std::atomic<bool>& is_inputing,
+			   std::vector<uint8_t>& keybinds, std::vector<std::pair<uint8_t, float>>& rewards)
 {
 	checkCudaError(cudaSetDevice(0));
 	static HWND hwnd_add = nullptr;
@@ -152,24 +153,9 @@ void inputUser(Cortex* cortex, HWND& hwnd,
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(200));
 		}
-		else if (GetAsyncKeyState(VK_LEFT) & 0x8000)
+		else if (auto it = std::find_if(rewards.begin(), rewards.end(), [](const auto& r) { return (GetAsyncKeyState(r.first) & 0x8000) != 0; }); it != rewards.end())
 		{
-			isScored.store(-0.5f, std::memory_order_relaxed);
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		}
-		else if (GetAsyncKeyState(VK_UP) & 0x8000)
-		{
-			isScored.store(1.0f, std::memory_order_relaxed);
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		}
-		else if (GetAsyncKeyState(VK_RIGHT) & 0x8000)
-		{
-			isScored.store(0.5f, std::memory_order_relaxed);
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		}
-		else if (GetAsyncKeyState(VK_DOWN) & 0x8000)
-		{
-			isScored.store(-1.0f, std::memory_order_relaxed);
+			isScored.store(it->second, std::memory_order_relaxed);
 			std::this_thread::sleep_for(std::chrono::milliseconds(200));
 		}
 		else if ((work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_EVALUATE_BY_CRITIC || work_mode.load(std::memory_order_acquire) == E_Workmode::TRAIN_BY_USER_EVALUATE_BY_USER) && is_inputing.load(std::memory_order_acquire))
@@ -251,6 +237,7 @@ struct KeyMapping
 	unsigned short code;
 };
 inline constexpr KeyMapping VK_MAP[] = {
+	{"ArrowLeft", 0x25}, {"ArrowUp", 0x26}, {"ArrowRight", 0x27}, {"ArrowDown", 0x28}, {"SlashBack", 0xDC},
 	{"-", 0xBD}, {".", 0x6E}, {"/", 0x6F}, {"=", 0xBB}, {",", 0xBC}, {"`", 0xC0},
 	{"0", 0x30}, {"1", 0x31}, {"2", 0x32}, {"3", 0x33}, {"4", 0x34}, {"5", 0x35}, {"6", 0x36}, {"7", 0x37}, {"8", 0x38}, {"9", 0x39},
 	{"a", 0x41}, {"alt", 0x12},
@@ -383,7 +370,23 @@ int main()
 			keybinds.push_back(find_by_key(key_str, finalPath));
 		}
 		file.close();
-		keybinds.shrink_to_fit();
+	}
+	std::vector<std::pair<uint8_t, float>> rewards;
+	{
+		const std::string finalPath = (std::filesystem::path(process_conf_path) / "rewards.txt").string();
+		std::ifstream file(finalPath);
+		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for reading: " + finalPath);
+		std::string line;
+		while (std::getline(file, line))
+		{
+			if (line.empty() || line[0] == '#') continue;
+			const size_t eq_pos = line.find('=');
+			if (eq_pos == std::string::npos) throw std::runtime_error("[SYSTEM ERROR] Expected format 'key=value' in string: " + line + "; " + finalPath);
+			std::string key_str = line.substr(0, eq_pos), val_str = line.substr(eq_pos + 1);
+			try { rewards.emplace_back(find_by_key(key_str, finalPath), std::stof(val_str)); }
+			catch (const std::exception&) { throw std::runtime_error("[SYSTEM ERROR] Invalid float value in string: " + line + "; " + finalPath); }
+		}
+		file.close();
 	}
 	Cortex cortex(option == "y", process_conf_path, work_mode, isEliminating, isScored, mtx_exp, mtx_running, cv_exp, cv_running, exp_add, is_running, is_inputing, keybinds);
 	if (msgOnPause(&cortex, hwnd, isScored, mtx_running, is_running, cv_running)) return 0;
@@ -391,7 +394,8 @@ int main()
 										  std::ref(work_mode), std::ref(isEliminating), std::ref(isScored),
 										  std::ref(mtx_exp), std::ref(mtx_running),
 										  std::ref(cv_exp), std::ref(cv_running),
-										  std::ref(exp_add), std::ref(is_running), std::ref(is_inputing), std::ref(keybinds));
+										  std::ref(exp_add), std::ref(is_running), std::ref(is_inputing),
+										  std::ref(keybinds), std::ref(rewards));
 	cortex.run();
 	if (inputThread.joinable()) inputThread.join();
 	cudaDeviceReset();
