@@ -14,8 +14,6 @@ private:
 	universal_vector<uint32_t> buffer_a, buffer_b;
 	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
 public:
-	float get_score_output(size_t idx) const { return score_output[idx]; }
-	auto& get_output() { return score_output; }
 	void saveToFile(std::string pathFile) const
 	{
 		for (int i = 0; i < conv_layers.size(); i++) conv_layers[i]->saveToFile((std::filesystem::path(pathFile) / "conv_layers" / (std::to_string(i) + ".bin")).string());
@@ -128,4 +126,6 @@ public:
 		}
 	}
 	void reset(cudaStream_t stream_lnk = 0) { evaluator->reset(stream_lnk); }
+	float get_score_output(size_t idx) const { return score_output[idx]; }
+	auto& get_output() { return score_output; }
 };

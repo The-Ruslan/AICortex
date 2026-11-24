@@ -49,7 +49,11 @@ public:
 		std::filesystem::path dir = file_path.parent_path();
 		if (!std::filesystem::exists(dir)) std::filesystem::create_directories(dir);
 		std::ofstream file(pathFile, std::ios::binary);
-		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for writing: " + pathFile);
+		if (!file.is_open())
+		{
+			std::cout << "[SYSTEM ERROR] Failed to open file for writing: " << pathFile << std::endl;
+			return;
+		}
 		universal_vector<float> biases_tmp(out_channels, MemoryType::PinnedHost);
 		checkCudaError(cudaDeviceSynchronize());
 		biases_tmp.copy(biases, 0, out_channels, 0, out_channels, 0);

@@ -12,7 +12,6 @@ private:
 	universal_vector<int8_t> buffer_a_scales, buffer_b_scales;
 	universal_vector<float> grad_buffer_a, grad_residual;
 public:
-	auto& get_output() { return mamba_layers[mamba_layers.size() < 1 ? 0 : mamba_layers.size() - 1]->get_output(); }
 	void saveToFile(std::string pathFile) const
 	{
 		mamba_layers[0]->saveToFile((std::filesystem::path(pathFile) / "mamba_1.bin").string());
@@ -100,4 +99,5 @@ public:
 		}
 	}
 	void reset(cudaStream_t stream_lnk = 0) { for (int i = 0; i < mamba_layers.size(); i++) mamba_layers[i]->reset(stream_lnk); }
+	auto& get_output() { return mamba_layers[mamba_layers.size() < 1 ? 0 : mamba_layers.size() - 1]->get_output(); }
 };
