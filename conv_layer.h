@@ -12,6 +12,15 @@ private:
 	universal_vector<int8_t> weight_scales;
 	universal_vector<float> master_weights, biases, grad_weights, grad_biases;
 public:
+	void generateFromRandom()
+	{
+		float offset = 0.0f;
+		if (is_dw) offset = std::sqrtf(1.0f / (kernel_size * kernel_size));
+		else offset = std::sqrtf(2.0f / (in_channels + (disable_activation ? out_channels : 0)));
+		generateNormalRandoms(master_weights, real_size_weight, offset, 0, real_size_weight);
+		LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
+		biases.fill(0, out_channels, 0, 0);
+	}
 	void saveToFile(std::string pathFile) const
 	{
 		std::filesystem::path file_path(pathFile);
@@ -29,7 +38,12 @@ public:
 	void loadFromFile(std::string pathFile)
 	{
 		std::ifstream file(pathFile, std::ios::binary);
-		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for reading: " + pathFile);
+		if (!file.is_open())
+		{
+			std::cout << "[SYSTEM ERROR] Failed to open file for reading: " << pathFile << std::endl;
+			generateFromRandom();
+			return;
+		}
 		universal_vector<float> biases_tmp(out_channels, MemoryType::PinnedHost);
 		checkCudaError(cudaDeviceSynchronize());
 		file.read(reinterpret_cast<char*>(master_weights.data()), real_size_weight * sizeof(float));
@@ -91,15 +105,7 @@ public:
 			}
 		}
 		if (isLoaded) loadFromFile(dir_path);
-		else
-		{
-			float offset = 0.0f;
-			if (is_dw) offset = std::sqrtf(1.0f / (kernel_size * kernel_size));
-			else offset = std::sqrtf(2.0f / (in_channels + (disable_activation ? out_channels : 0)));
-			generateNormalRandoms(master_weights, real_size_weight, offset, 0, real_size_weight);
-			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
-			biases.fill(0, out_channels, 0, 0);
-		}
+		else generateFromRandom();
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales, uint32_t* output, int8_t* output_scales)
 	{

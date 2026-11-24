@@ -46,7 +46,7 @@ public:
 			in_channels = middle_channels;
 			middle_channels = in_channels << 2;
 		}
-		evaluator = std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, 0);
+		evaluator = std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, 0, -10.1f);
     }
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, int total_size_grad_weights, int total_size_grad_biases, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, uint8_t*& dev_main_ptr_grad_buffer_a)
 	{
@@ -55,7 +55,7 @@ public:
 		score_real.resize(reinterpret_cast<float*>(current_host_main_ptr), out_channels, MemoryType::PinnedHost);
 		current_host_main_ptr += align16(out_channels * sizeof(float));
 		for (int i = 0; i < conv_layers.size(); i++) conv_layers[i]->initData(isLoaded, (std::filesystem::path(dir_path) / "conv_layers" / (std::to_string(i) + ".bin")).string(), current_dev_main_ptr, current_host_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, false, nullptr, nullptr, total_size_grad_weights, total_size_grad_biases);
-		evaluator->initData(isLoaded, (std::filesystem::path(dir_path) / "evaluator_layer.bin").string(), current_dev_main_ptr, current_host_main_ptr, current_dev_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, false, nullptr, nullptr, total_size_grad_weights, total_size_grad_biases, -10.1f);
+		evaluator->initData(isLoaded, (std::filesystem::path(dir_path) / "evaluator_layer.bin").string(), current_dev_main_ptr, current_host_main_ptr, current_dev_main_ptr, dev_side_ptr_weights, dev_side_ptr_biases, false, nullptr, nullptr, total_size_grad_weights, total_size_grad_biases);
 		buffer_a.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_a), *pipo_db_num_groups << 2, MemoryType::Device);
 		buffer_a_scales.resize(reinterpret_cast<int8_t*>(dev_main_ptr_buffer_a_scales), *pipo_db_num_groups, MemoryType::Device);
 		buffer_b.resize(reinterpret_cast<uint32_t*>(dev_main_ptr_buffer_b), *pipo_db_num_groups << 2, MemoryType::Device);

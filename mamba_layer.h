@@ -14,7 +14,7 @@ class MambaLayer
 private:
 	const int in_channels, out_channels, d_inner, h_states_size, real_size_weight, num_groups, activation_type;
 	cudaStream_t stream_forward, stream_backward;
-	const float learning_rate, f_penalty;
+	const float learning_rate, f_penalty, base_a_re;
 	universal_vector<uint32_t> weights;
 	universal_vector<int8_t> weight_scales;
 	universal_vector<float> master_weights, biases, grad_weights, grad_biases;
@@ -22,6 +22,27 @@ private:
 	universal_vector<float2> h_states, trace_A, trace_B, trace_Delta;
 public:
 	auto& get_output() { return mamba_output; }
+	void generateFromRandom()
+	{
+		generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / d_inner), 0, real_size_weight);
+		biases.fill(0, out_channels, 0, 0);
+		for(int b = 0; b < (d_inner + mamba_mimo_group_size - 1) / mamba_mimo_group_size; ++b)
+		{
+			for(int row = 0; row < mamba_mimo_group_size; ++row)
+			{
+				for(int col = 0; col < mamba_mimo_group_size; ++col)
+				{
+					const size_t global_idx = d_inner + b * mamba_mimo_matrix_elements + row * mamba_mimo_group_size + col;
+					if (global_idx >= real_size_weight) break;
+					master_weights[global_idx] = fmaf(getFastRandomFloatBoundedUniform(global_idx, std::sqrtf(1.0f / mamba_mimo_group_size)), 0.1f, static_cast<float>(row == col));
+				}
+			}
+		}
+		const size_t off_A_re = d_inner + (d_inner << 5) + h_states_size + h_states_size, off_A_im = off_A_re + h_states_size;
+		master_weights.for_each_n(h_states_size, MambaWeightsOP<float>{master_weights.data() + off_A_re, base_a_re}, 0);
+		master_weights.fill(off_A_im, off_A_im + h_states_size, 0.001f, 0);
+		LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
+	}
 	void saveToFile(std::string pathFile) const
 	{
 		std::filesystem::path file_path(pathFile);
@@ -39,7 +60,12 @@ public:
 	void loadFromFile(std::string pathFile)
 	{
 		std::ifstream file(pathFile, std::ios::binary);
-		if (!file.is_open()) throw std::runtime_error("[SYSTEM ERROR] Failed to open file for reading: " + pathFile);
+		if (!file.is_open())
+		{
+			std::cout << "[SYSTEM ERROR] Failed to open file for reading: " << pathFile << std::endl;
+			generateFromRandom();
+			return;
+		}
 		universal_vector<float> biases_tmp(out_channels, MemoryType::PinnedHost);
 		checkCudaError(cudaDeviceSynchronize());
 		file.read(reinterpret_cast<char*>(master_weights.data()), real_size_weight * sizeof(float));
@@ -50,18 +76,15 @@ public:
 	}
 	MambaLayer(int input_channels, int output_channels, cudaStream_t stream_fwd, int* total_size_grad_weights, int* total_size_grad_biases,
 			   cudaStream_t stream_bwd, float learningRate, float penalty, size_t* total_mem_device, size_t* total_mem_host,
-			   size_t* total_learnable_data, size_t* total_learnable_data_count, int type_activation) :
-		in_channels(input_channels),
-		out_channels(output_channels),
+			   size_t* total_learnable_data, size_t* total_learnable_data_count, int type_activation, float a_re_base) :
+		in_channels(input_channels), out_channels(output_channels),
 		d_inner(in_channels << 1),
 		h_states_size(d_inner * mamba_d_state),
 		real_size_weight(d_inner * (2 + mamba_mimo_group_size + (mamba_d_state << 2) + out_channels)),
 		num_groups(real_size_weight >> 5),
 		activation_type(type_activation),
-		stream_forward(stream_fwd),
-		stream_backward(stream_bwd),
-		learning_rate(learningRate),
-		f_penalty(penalty)
+		stream_forward(stream_fwd), stream_backward(stream_bwd),
+		learning_rate(learningRate), f_penalty(penalty), base_a_re(a_re_base)
 	{
 		*total_size_grad_weights = *total_size_grad_weights < real_size_weight ? real_size_weight : *total_size_grad_weights;
 		*total_size_grad_biases = *total_size_grad_biases < out_channels ? out_channels : *total_size_grad_biases;
@@ -70,7 +93,7 @@ public:
 		if (total_learnable_data) *total_learnable_data = *total_learnable_data + real_size_weight + out_channels;
 		if (total_learnable_data_count) *total_learnable_data_count = *total_learnable_data_count + 2;
 	}
-	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& current_dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float*** meta_adapted_data, size_t** meta_adapted_offsets, int total_size_grad_weights, int total_size_grad_biases, float base_a_re)
+	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& current_dev_side_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, bool is_in_inference, float*** meta_adapted_data, size_t** meta_adapted_offsets, int total_size_grad_weights, int total_size_grad_biases)
 	{
 		size_t w_bytes = align16(out_channels * sizeof(float));
 		mamba_output.resize(reinterpret_cast<float*>(current_dev_main_ptr), out_channels, MemoryType::Device);
@@ -120,27 +143,7 @@ public:
 			}
 		}
 		if (isLoaded) loadFromFile(dir_path);
-		else
-		{
-			generateNormalRandoms(master_weights, real_size_weight, std::sqrtf(2.0f / d_inner), 0, real_size_weight);
-			biases.fill(0, biases.size(), 0, 0);
-			for(int b = 0; b < (d_inner + mamba_mimo_group_size - 1) / mamba_mimo_group_size; ++b)
-			{
-				for(int row = 0; row < mamba_mimo_group_size; ++row)
-				{
-					for(int col = 0; col < mamba_mimo_group_size; ++col)
-					{
-						const size_t global_idx = d_inner + b * mamba_mimo_matrix_elements + row * mamba_mimo_group_size + col;
-						if (global_idx >= real_size_weight) break;
-						master_weights[global_idx] = fmaf(getFastRandomFloatBoundedUniform(global_idx, std::sqrtf(1.0f / mamba_mimo_group_size)), 0.1f, static_cast<float>(row == col));
-					}
-				}
-			}
-			const size_t off_A_re = d_inner + (d_inner << 5) + h_states_size + h_states_size, off_A_im = off_A_re + h_states_size;
-			master_weights.for_each_n(h_states_size, MambaWeightsOP<float>{master_weights.data() + off_A_re, base_a_re}, 0);
-			master_weights.fill(off_A_im, off_A_im + h_states_size, 0.001f, 0);
-			LAUNCH_KERNEL(quantizeKernel<>, (num_groups + gpu_block_threads - 1) / gpu_block_threads, gpu_block_threads, 0, 0, master_weights.data(), weights.data(), weight_scales.data(), real_size_weight, real_size_weight);
-		}
+		else generateFromRandom();
 	}
 	void forward(const uint32_t* input, const int8_t* input_scales, bool update_state = true)
 	{
