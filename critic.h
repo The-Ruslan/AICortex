@@ -44,7 +44,7 @@ public:
 			in_channels = middle_channels;
 			middle_channels = in_channels << 2;
 		}
-		evaluator = std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, 0, -10.1f);
+		evaluator = std::make_unique<MambaLayer>(in_channels, out_channels, stream_forward, total_size_grad_weights, total_size_grad_biases, stream_backward, learningRate, penalty, total_mem_main_device, total_mem_main_host, nullptr, nullptr, 0, -8.8f);
     }
 	void initData(bool isLoaded, std::string dir_path, uint8_t*& current_dev_main_ptr, uint8_t*& current_host_main_ptr, uint8_t*& dev_side_ptr_weights, uint8_t*& dev_side_ptr_biases, int total_size_grad_weights, int total_size_grad_biases, uint8_t*& dev_main_ptr_buffer_a, uint8_t*& dev_main_ptr_buffer_a_scales, uint8_t*& dev_main_ptr_buffer_b, uint8_t*& dev_main_ptr_buffer_b_scales, uint8_t*& dev_main_ptr_grad_buffer_a)
 	{
@@ -82,12 +82,16 @@ public:
 	{
 		score_real.copy(real_score, 0, out_channels, 0, out_channels, stream_backward);
 		int grad_mask = conv_layers.size() & 1, mask = 0;
-		const float* real_score_ptr = score_real.data();
 		auto* __restrict__ raw_target = grad_mask ? grad_input.data() : grad_buffer_a.data();
 		const auto* __restrict__ raw_score = evaluator->get_output().data();
-		grad_input.for_each_n(evaluator->get_output().size(), [raw_target, raw_score, real_score_ptr] __device__ (size_t i) 
+		const float* real_score_ptr = score_real.data();
+		grad_input.for_each_n(evaluator->get_output().size(), [raw_target, raw_score, real_score_ptr] __device__ (size_t i)
 		{
-			raw_target[i] = raw_score[i] - real_score_ptr[i];
+			const float target = real_score_ptr[i];
+			const float pred = raw_score[i];
+			const float diff = pred - target;
+			const float delta = fmaxf(0.1f, fmaxf(fabsf(target), fabsf(pred)) * 0.25f);
+			raw_target[i] = fabsf(diff) <= delta ? diff : copysignf(delta, diff);
 		}, stream_backward);
 		const uint32_t* eval_input = input;
 		const int8_t* eval_input_scales = input_scales;

@@ -125,11 +125,11 @@ public:
 			grad_weights.resize(reinterpret_cast<float*>(dev_side_ptr_weights), total_size_grad_weights, MemoryType::Device);
 			grad_biases.resize(reinterpret_cast<float*>(dev_side_ptr_biases), total_size_grad_biases, MemoryType::Device);
 			w_bytes = align16(h_states_size * sizeof(float2));
-			trace_A.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
+			trace_A.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, make_float2(0.0f, 0.0f), MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
-			trace_B.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
+			trace_B.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, make_float2(0.0f, 0.0f), MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
-			trace_Delta.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, MemoryType::Device);
+			trace_Delta.resize(reinterpret_cast<float2*>(current_dev_side_ptr), h_states_size, make_float2(0.0f, 0.0f), MemoryType::Device);
 			current_dev_side_ptr += w_bytes;
 			if (meta_adapted_data)
 			{

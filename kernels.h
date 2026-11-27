@@ -43,7 +43,7 @@ __host__ __device__ __forceinline__ uint32_t getFastRandomModifier(uint32_t seed
 	return seed;
 }
 __host__ __device__ __forceinline__ uint32_t getFastRandomBounded(uint32_t seed, uint32_t n) { return (static_cast<uint64_t>(getFastRandomModifier(seed)) * static_cast<uint64_t>(n)) >> 32; }
-__host__ __device__ __forceinline__ float getFastRandomFloatBoundedUniform(uint32_t seed, float n) { return getFastRandomModifier(seed) * (1.0f / 0xFFFFFFFFf) * n; }
+__host__ __device__ __forceinline__ float getFastRandomFloatBoundedUniform(uint32_t seed, float n) { return getFastRandomModifier(seed) * (1.0f / 0x1p32f) * n; }
 __host__ __device__ __forceinline__ float getFastRandomFloatBoundedNormal(uint32_t seed, float n) { return -n + getFastRandomFloatBoundedUniform(seed, n) * 2.0f; }
 template <typename T>
 inline void generateNormalRandoms(universal_vector<T>& arr_it, int size, float offset, cudaStream_t stream, int seed = 1234)
@@ -1391,15 +1391,17 @@ __global__ void mambaSSMApplyTracesKernel(const uint32_t* __restrict__ input, co
 		const int idx = base_tr_lane_id + (i << 5);
 		const float wc_re_raw = master_weights[off_W_C_re + idx];
 		const float wc_im_raw = master_weights[off_W_C_im + idx];
+		const float are_raw = master_weights[off_A_re + idx];
 		const float2 h_curr = h_states[idx];
 		const float2 tr_a = trace_A[idx];
 		const float2 tr_b = trace_B[idx];
 		const float2 tr_dt = trace_Delta[idx];
 		const float gh_re = grad_y_ssm * wc_re_raw;
 		const float gh_im = -grad_y_ssm * wc_im_raw;
+		const float are = -__expf(are_raw);
 		atomicAdd(&grad_weights[off_W_C_re + idx], grad_y_ssm * h_curr.x);
 		atomicAdd(&grad_weights[off_W_C_im + idx], -grad_y_ssm * h_curr.y);
-		atomicAdd(&grad_weights[off_A_re + idx], fmaf(gh_re, tr_a.x, gh_im * tr_a.y));
+		atomicAdd(&grad_weights[off_A_re + idx], fmaf(gh_re, tr_a.x, gh_im * tr_a.y) * are);
 		atomicAdd(&grad_weights[off_A_im + idx], fmaf(gh_im, tr_a.x, -gh_re * tr_a.y));
 		g_B_mimo_total = fmaf(gh_re, tr_b.x, fmaf(gh_im, tr_b.y, g_B_mimo_total));
 		g_dt_total = fmaf(gh_re, tr_dt.x, fmaf(gh_im, tr_dt.y, g_dt_total));
