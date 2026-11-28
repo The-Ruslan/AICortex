@@ -426,7 +426,7 @@ private:
 			if ((seq_idx & 3) == 3)
 			{
 				checkCudaError(cudaStreamSynchronize(stream_backward.get()));
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
 			}
 		}
 		const float meta_lr_inv = -(0.01f - 1.0f / (1.0f + std::expf(-0.001f * (epoch - 2000))) * (0.01f - 0.003f));
@@ -456,7 +456,7 @@ private:
 			if ((seq_idx & 3) == 3)
 			{
 				checkCudaError(cudaStreamSynchronize(stream_backward.get()));
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
 			}
 		}
 	}
@@ -597,32 +597,29 @@ public:
 		stream_exp.reset(temp_stream_exp);
 		int dimension = img_resolution, dimension_old = dimension, total_size_grad_weights = 0, total_size_grad_biases = 0;
 		constexpr int patchified_subtractor = 2;
-		const int conv_block_depth = std::lround(std::log2(img_resolution)) + 1;
-		const int conv_block_depth_patchified = conv_block_depth - patchified_subtractor;
-		const float inv_depth = 1.0f / (conv_block_depth_patchified + 1);
-		const float step_val = (penalty_first - penalty_last) / (conv_block_depth_patchified - 1);
-		const float penalty_val = fmaf(-conv_block_depth_patchified + 1, step_val, penalty_first);
+		constexpr int conv_block_depth = (31 - constexpr_clz(img_resolution)) + 1;
+		constexpr int conv_block_depth_patchified = conv_block_depth - patchified_subtractor;
+		constexpr float inv_depth = 1.0f / (conv_block_depth_patchified + 1);
+		constexpr float step_val = (penalty_first - penalty_last) / (conv_block_depth_patchified - 1);
+		constexpr float penalty_val = (-conv_block_depth_patchified + 1) * step_val + penalty_first;
 		size_t total_device_bytes_main = 0, total_host_bytes_main = 0, total_device_bytes_side = 0, total_host_bytes_side = 0, w_bytes = 0, total_learnable_data = 0, total_learnable_data_count = 0;
 		int input_channels = base_channels;
 		conv_blocks.reserve(conv_block_depth_patchified);
 		exp.stochasticDepth.resize(conv_block_depth_patchified);
-		int current_step = 1;
 		{
-			const float progress_out = current_step * inv_depth; 
-			const int output_channels = (std::lround(base_channels + (final_channels - base_channels) * progress_out * progress_out * progress_out) + 31) & ~31;
+			constexpr int output_channels = (static_cast<int>(base_channels + (final_channels - base_channels) * inv_depth * inv_depth * inv_depth + 0.5f) + 31) & ~31;
 			patcher = std::make_unique<ConvLayer>(input_channels, output_channels, 4, 4, dimension, dimension >> 2, stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases, stream_backward.get(), learning_rate, penalty_first, &total_device_bytes_main, &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count, true);
 			dimension = dimension >> 2;
 			dimension_old = dimension;
 			input_channels = output_channels;
-			current_step++;
 		}
 		for (int i = patchified_subtractor; i < conv_block_depth; ++i)
 		{
 			const int stride = i == patchified_subtractor ? 1 : 2;
 			dimension = stride == 2 ? dimension >> 1 : dimension;
-			const float progress_out = current_step * inv_depth;
-			const int output_channels = (std::lround(base_channels + (final_channels - base_channels) * progress_out * progress_out * progress_out) + 31) & ~31;
-			const int middle_channels = (std::lround(output_channels * (middle_channels_factor - (middle_channels_factor >> 1) * progress_out)) + 31) & ~31;
+			const float progress_out = i * inv_depth;
+			const int output_channels = (static_cast<int>(base_channels + (final_channels - base_channels) * progress_out * progress_out * progress_out + 0.5f) + 31) & ~31;
+			const int middle_channels = (static_cast<int>(output_channels * (middle_channels_factor - (middle_channels_factor >> 1) * progress_out) + 0.5f) + 31) & ~31;
 			conv_blocks.push_back(std::make_unique<ConvBlock>(input_channels, middle_channels, output_channels, stride, dimension_old, dimension,
 															  stream_forward.get(), &total_size_grad_weights, &total_size_grad_biases,
 															  &pipo_db, &pipo_db_num_groups, std::min(7, std::max(3, dimension_old | 1)),
@@ -631,7 +628,6 @@ public:
 															  &total_host_bytes_main, &total_learnable_data, &total_learnable_data_count));
 			dimension_old = dimension;
 			input_channels = output_channels;
-			current_step++;
 		}
 		const int final_output_channels = keybinds.size() + total_bits_mouse, final_output_channels_padded = (final_output_channels + 31) & ~31;
 		const bool is_in_inference = work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE || work_mode.load(std::memory_order_acquire) == E_Workmode::INFERENCE_ON_TRAIN;

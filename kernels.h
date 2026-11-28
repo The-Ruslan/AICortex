@@ -17,7 +17,19 @@
 __host__ __device__ __forceinline__ __half2_raw h2_zero() { return __half2_raw{0x0000, 0x0000}; }
 __host__ __device__ __forceinline__ __half2_raw h2_one() { return __half2_raw{0x3C00, 0x3C00}; }
 
+__host__ __device__ __forceinline__ constexpr int constexpr_clz(unsigned int x)
+{
+	if (x == 0) return 32;
+	int n = 0;
+	if ((x & 0xFFFF0000) == 0) { n += 16; x <<= 16; }
+	if ((x & 0xFF000000) == 0) { n += 8; x <<= 8; }
+	if ((x & 0xF0000000) == 0) { n += 4; x <<= 4; }
+	if ((x & 0xC0000000) == 0) { n += 2; x <<= 2; }
+	if ((x & 0x80000000) == 0) { n += 1; }
+	return n;
+}
 __host__ __device__ __forceinline__ constexpr bool test_bit(action_type action, int position) { return (action >> position) & 1; }
+
 __host__ __device__ __forceinline__ uint32_t generateUniqueSeed(int sample_index = 0)
 {
 	uint32_t final_seed = 0;
@@ -1560,17 +1572,6 @@ __global__ void huberGradOutputKernel(const T* __restrict__ pred, const T* __res
 	#pragma unroll
 	for (int i = 0; i < 2; i++) thread_sum += sum[i << 1] + sum[(i << 1) + 1];
 	if (thread_sum != 0.0f) atomicAdd(&grad_output[idx], thread_sum * factor);
-}
-__host__ __device__ __forceinline__ constexpr int constexpr_clz(unsigned int x)
-{
-	if (x == 0) return 32;
-	int n = 0;
-	if ((x & 0xFFFF0000) == 0) { n += 16; x <<= 16; }
-	if ((x & 0xFF000000) == 0) { n += 8; x <<= 8; }
-	if ((x & 0xF0000000) == 0) { n += 4; x <<= 4; }
-	if ((x & 0xC0000000) == 0) { n += 2; x <<= 2; }
-	if ((x & 0x80000000) == 0) { n += 1; }
-	return n;
 }
 template <int resolution = img_resolution>
 __global__ void fftRowKernel(const __half* __restrict__ input, __half2* __restrict__ output)
